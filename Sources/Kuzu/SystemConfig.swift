@@ -12,21 +12,34 @@ import Foundation
 ///
 /// The configuration includes settings for buffer pool size, thread management,
 /// compression, read-only mode, and database size limits.
+///
+/// Platform-specific defaults:
+/// - **macOS**: buffer pool 4GB, maxDBSize from system default
+/// - **iOS**: buffer pool 512MB, maxDBSize 4GB, maxNumThreads 2
+/// - **tvOS**: buffer pool 1GB
+/// - **watchOS**: buffer pool 128MB
 public final class SystemConfig: @unchecked Sendable {
     internal var cSystemConfig: kuzu_system_config
 
     /// Creates a new system configuration with default values.
     ///
     /// The default system configuration is as follows:
-    /// - bufferPoolSize: 80% of the total system memory on macOS and Linux, 2GB on iOS, 1GB on tvOS, and 128MB on watchOS
-    /// - maxNumThreads: Number of CPU cores available in the system
+    /// - bufferPoolSize: 4GB on macOS, 512MB on iOS, 1GB on tvOS, 128MB on watchOS,
+    ///   80% of system memory on Linux
+    /// - maxNumThreads: 2 on iOS, number of CPU cores on other platforms
+    /// - maxDBSize: 4GB on iOS, system default on other platforms
     /// - enableCompression: true
     /// - readOnly: false
     /// - threadQos: QOS_CLASS_DEFAULT (Apple platforms only)
     public init() {
         cSystemConfig = kuzu_default_system_config()
+        #if os(macOS)
+            cSystemConfig.buffer_pool_size = 4096 * 1024 * 1024
+        #endif
         #if os(iOS)
-            cSystemConfig.buffer_pool_size = 2048 * 1024 * 1024
+            cSystemConfig.buffer_pool_size = 512 * 1024 * 1024
+            cSystemConfig.max_db_size = 4 * 1024 * 1024 * 1024
+            cSystemConfig.max_num_threads = 2
         #endif
         #if os(tvOS)
             cSystemConfig.buffer_pool_size = 1024 * 1024 * 1024
@@ -39,19 +52,21 @@ public final class SystemConfig: @unchecked Sendable {
     /// Creates a new system configuration with the specified parameters.
     ///
     /// - Parameters:
-    ///   - bufferPoolSize: The size of the buffer pool in bytes. If 0, uses default (80% of system memory).
-    ///   - maxNumThreads: The maximum number of threads that can be used by the database system. If 0, uses default (number of CPU cores).
+    ///   - bufferPoolSize: The size of the buffer pool in bytes. If 0, uses platform default.
+    ///   - maxNumThreads: The maximum number of threads. If 0, uses platform default (2 on iOS, CPU cores elsewhere).
     ///   - enableCompression: A boolean flag to enable or disable compression. Default is true.
     ///   - readOnly: A boolean flag to open the database in read-only mode. Default is false.
     ///   - autoCheckpoint: Whether to automatically create checkpoints. Default is true.
     ///   - checkpointThreshold: The threshold for creating checkpoints. If set to UInt64.max, uses default value.
+    ///   - maxDBSize: The maximum size of the database in bytes. If 0, uses platform default (4GB on iOS, system default elsewhere).
     public convenience init(
         bufferPoolSize: UInt64 = 0,
         maxNumThreads: UInt64 = 0,
         enableCompression: Bool = true,
         readOnly: Bool = false,
         autoCheckpoint: Bool = true,
-        checkpointThreshold: UInt64 = UInt64.max
+        checkpointThreshold: UInt64 = UInt64.max,
+        maxDBSize: UInt64 = 0
     ) {
         self.init()
         if bufferPoolSize > 0 {
@@ -66,6 +81,9 @@ public final class SystemConfig: @unchecked Sendable {
         if checkpointThreshold > 0 {
             cSystemConfig.checkpoint_threshold = checkpointThreshold
         }
+        if maxDBSize > 0 {
+            cSystemConfig.max_db_size = maxDBSize
+        }
     }
 
     #if !os(Linux)
@@ -73,12 +91,13 @@ public final class SystemConfig: @unchecked Sendable {
         /// This initializer is only available on Apple platforms.
         ///
         /// - Parameters:
-        ///   - bufferPoolSize: The size of the buffer pool in bytes. If 0, uses default (80% of system memory).
-        ///   - maxNumThreads: The maximum number of threads that can be used by the database system. If 0, uses default (number of CPU cores).
+        ///   - bufferPoolSize: The size of the buffer pool in bytes. If 0, uses platform default.
+        ///   - maxNumThreads: The maximum number of threads. If 0, uses platform default (2 on iOS, CPU cores elsewhere).
         ///   - enableCompression: A boolean flag to enable or disable compression. Default is true.
         ///   - readOnly: A boolean flag to open the database in read-only mode. Default is false.
         ///   - autoCheckpoint: Whether to automatically create checkpoints. Default is true.
         ///   - checkpointThreshold: The threshold for creating checkpoints. If set to UInt64.max, uses default value.
+        ///   - maxDBSize: The maximum size of the database in bytes. If 0, uses platform default (4GB on iOS, system default elsewhere).
         ///   - threadQoS: The quality of service (QoS) for the worker threads. This is only available on Apple platforms. The default value is QOS_CLASS_DEFAULT.
         public convenience init(
             bufferPoolSize: UInt64 = 0,
@@ -87,8 +106,8 @@ public final class SystemConfig: @unchecked Sendable {
             readOnly: Bool = false,
             autoCheckpoint: Bool = true,
             checkpointThreshold: UInt64 = UInt64.max,
+            maxDBSize: UInt64 = 0,
             threadQoS: qos_class_t = QOS_CLASS_DEFAULT
-
         ) {
             self.init(
                 bufferPoolSize: bufferPoolSize,
@@ -96,7 +115,8 @@ public final class SystemConfig: @unchecked Sendable {
                 enableCompression: enableCompression,
                 readOnly: readOnly,
                 autoCheckpoint: autoCheckpoint,
-                checkpointThreshold: checkpointThreshold
+                checkpointThreshold: checkpointThreshold,
+                maxDBSize: maxDBSize
             )
             self.cSystemConfig.thread_qos = threadQoS.rawValue
         }
