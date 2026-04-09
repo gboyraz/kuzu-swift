@@ -12,6 +12,8 @@
 #include "extension/extension_manager.h"
 #include "main/client_context.h"
 #include "processor/expression_mapper.h"
+#include "storage/buffer_manager/buffer_manager.h"
+#include "storage/checkpointer.h"
 #include "storage/local_storage/local_rel_table.h"
 #include "storage/storage_manager.h"
 #include "storage/table/node_table.h"
@@ -28,9 +30,76 @@ using namespace kuzu::transaction;
 namespace kuzu {
 namespace storage {
 
+// A Checkpointer subclass used during WAL recovery. It applies shadow pages
+// directly to the data file without writing a CHECKPOINT record to the WAL
+// or resetting/removing the WAL file. This allows committed data to be flushed
+// to disk between transactions during replay, reclaiming buffer pool memory.
+class RecoveryCheckpointer : public Checkpointer {
+public:
+    using Checkpointer::Checkpointer;
+
+    // Recovery-safe version of writeCheckpoint that does NOT touch the WAL file
+    // and does NOT remove the shadow file.
+    void writeRecoveryCheckpoint() {
+        if (clientContext.isInMemory()) {
+            return;
+        }
+
+        auto databaseHeader = getCurrentDatabaseHeader();
+        bool hasStorageChanges = checkpointStorage();
+        serializeCatalogAndMetadata(databaseHeader, hasStorageChanges);
+        writeDatabaseHeader(databaseHeader);
+        // Use our override that skips WAL logging.
+        logCheckpointAndApplyShadowPages();
+
+        auto storageManager = clientContext.getStorageManager();
+        storageManager->finalizeCheckpoint();
+
+        auto bufferManager = clientContext.getMemoryManager()->getBufferManager();
+        bufferManager->removeEvictedCandidates();
+
+        clientContext.getCatalog()->resetVersion();
+        auto* dataFH = storageManager->getDataFH();
+        dataFH->getPageManager()->resetVersion();
+        // NOTE: We intentionally do NOT call storageManager->getWAL().reset() or
+        // storageManager->getShadowFile().reset() here because we are still in the
+        // middle of replaying the WAL file.
+    }
+
+protected:
+    void logCheckpointAndApplyShadowPages() override {
+        const auto storageManager = clientContext.getStorageManager();
+        auto& shadowFile = storageManager->getShadowFile();
+        // Flush the shadow file to disk.
+        shadowFile.flushAll();
+        // Apply shadow pages directly to the data file WITHOUT logging to WAL.
+        shadowFile.applyShadowPages(clientContext);
+        // Clear shadow file buffers so they can be reused for the next transaction.
+        auto bufferManager = clientContext.getMemoryManager()->getBufferManager();
+        shadowFile.clear(*bufferManager);
+    }
+};
+
 WALReplayer::WALReplayer(main::ClientContext& clientContext) : clientContext{clientContext} {
     walPath = StorageUtils::getWALFilePath(clientContext.getDatabasePath());
     shadowFilePath = StorageUtils::getShadowFilePath(clientContext.getDatabasePath());
+}
+
+void WALReplayer::performRecoveryCheckpoint() const {
+    if (clientContext.isInMemory()) {
+        return;
+    }
+    try {
+        RecoveryCheckpointer checkpointer(clientContext);
+        checkpointer.writeRecoveryCheckpoint();
+        // After checkpoint, reload catalog and storage metadata from disk so that
+        // the next transaction's replay sees the freshly checkpointed state.
+        checkpointer.readCheckpoint();
+    } catch (const std::exception&) {
+        // If the intermediate checkpoint fails, we continue replaying. The data
+        // is still safe in the WAL and will be fully replayed. We just won't get
+        // the memory savings for this particular checkpoint interval.
+    }
 }
 
 void WALReplayer::replay() const {
@@ -137,6 +206,10 @@ void WALReplayer::replayWALRecord(WALRecord& walRecord) const {
     } break;
     case WALRecordType::COMMIT_RECORD: {
         clientContext.getTransactionContext()->commit();
+        // Flush committed data to disk to reclaim buffer pool memory.
+        // This prevents memory from growing unboundedly when replaying
+        // multiple transactions from the WAL.
+        performRecoveryCheckpoint();
     } break;
     case WALRecordType::CREATE_CATALOG_ENTRY_RECORD: {
         replayCreateCatalogEntryRecord(walRecord);

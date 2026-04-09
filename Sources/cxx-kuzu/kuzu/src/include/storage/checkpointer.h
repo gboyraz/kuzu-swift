@@ -61,11 +61,12 @@ private:
     static void readCheckpoint(main::ClientContext* context, catalog::Catalog* catalog,
         StorageManager* storageManager);
 
-    DatabaseHeader getCurrentDatabaseHeader() const;
     PageRange serializeCatalog(const catalog::Catalog& catalog, StorageManager& storageManager);
     PageRange serializeMetadata(const catalog::Catalog& catalog, StorageManager& storageManager);
 
 protected:
+    DatabaseHeader getCurrentDatabaseHeader() const;
+
     main::ClientContext& clientContext;
     bool isInMemory;
 };

@@ -15,6 +15,11 @@ public:
     void replay() const;
 
 private:
+    // Perform a checkpoint during recovery to flush committed data to disk and reclaim
+    // buffer pool memory. This is similar to a normal checkpoint but does NOT write a
+    // CHECKPOINT record to the WAL file (since we're still replaying it).
+    void performRecoveryCheckpoint() const;
+
     struct WALReplayInfo {
         uint64_t offsetDeserialized = 0;
         bool isLastRecordCheckpoint = false;
