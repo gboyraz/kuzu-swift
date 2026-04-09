@@ -573,7 +573,238 @@ final class StressTests: XCTestCase {
         print("[StressTest] Data integrity verified across close/reopen cycles ✓")
     }
 
-    // MARK: - Test 4: Concurrent Queries Under Memory Pressure
+    // MARK: - Test 4: Recovery From Corrupt WAL (SIGKILL Simulation)
+
+    func testRecoveryFromCorruptWAL() throws {
+        let tempDir = NSTemporaryDirectory() + "kuzu_wal_corrupt_" + UUID().uuidString
+        let dbPath = tempDir + "/db"
+        try FileManager.default.createDirectory(
+            atPath: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(atPath: tempDir)
+            print("[StressTest] Cleaned up temp directory")
+        }
+
+        let fm = FileManager.default
+        let overallStart = Date()
+        // WAL file path follows Kuzu convention: {dbPath}.wal
+        let walPath = dbPath + ".wal"
+
+        // ── Session 1: Create clean baseline ──
+        do {
+            let sessionStart = Date()
+            print("[StressTest] Session 1: Creating database and populating baseline data...")
+
+            let config = SystemConfig(
+                bufferPoolSize: 256 * 1024 * 1024,
+                maxNumThreads: 2,
+                autoCheckpoint: true,
+                checkpointThreshold: 16 * 1024 * 1024
+            )
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+
+            // Create schema
+            _ = try conn.query(
+                "CREATE NODE TABLE TestNode(id INT64, data STRING, PRIMARY KEY(id));")
+            print("[StressTest]   Schema created")
+
+            // Insert 500 nodes in batches of 100
+            for batchStart in stride(from: 0, to: 500, by: 100) {
+                let batchEnd = min(batchStart + 100, 500)
+                var rows = [String]()
+                for i in batchStart..<batchEnd {
+                    rows.append("{id: \(i), data: 'node_\(i)'}")
+                }
+                let query = "UNWIND [\(rows.joined(separator: ","))] AS row CREATE (:TestNode {id: row.id, data: row.data});"
+                _ = try conn.query(query)
+            }
+            print("[StressTest]   500 nodes inserted")
+
+            // Force explicit checkpoint
+            _ = try conn.query("CHECKPOINT;")
+            print("[StressTest]   Explicit CHECKPOINT executed")
+
+            // Insert 200 more nodes WITHOUT checkpoint (WAL only)
+            for batchStart in stride(from: 500, to: 700, by: 100) {
+                let batchEnd = min(batchStart + 100, 700)
+                var rows = [String]()
+                for i in batchStart..<batchEnd {
+                    rows.append("{id: \(i), data: 'node_\(i)'}")
+                }
+                let query = "UNWIND [\(rows.joined(separator: ","))] AS row CREATE (:TestNode {id: row.id, data: row.data});"
+                _ = try conn.query(query)
+            }
+            print("[StressTest]   200 more nodes inserted (WAL only, no checkpoint)")
+
+            let sessionElapsed = Date().timeIntervalSince(sessionStart)
+            print("[StressTest] Session 1 complete in \(String(format: "%.1f", sessionElapsed))s")
+        }
+        // DB closes here — forceCheckpointOnClose may checkpoint everything
+
+        // ── Session 2: Corrupt the WAL file to simulate SIGKILL ──
+        do {
+            print("[StressTest] Session 2: Corrupting WAL file to simulate SIGKILL...")
+
+            // Check multiple possible WAL paths
+            var actualWalPath: String? = nil
+            let candidatePaths = [walPath]
+            // Also check inside the DB directory
+            if fm.fileExists(atPath: dbPath) {
+                if let contents = try? fm.contentsOfDirectory(atPath: dbPath) {
+                    for file in contents where file.contains("wal") {
+                        let fullPath = (dbPath as NSString).appendingPathComponent(file)
+                        print("[StressTest]   Found WAL-related file inside DB dir: \(file)")
+                        if actualWalPath == nil {
+                            actualWalPath = fullPath
+                        }
+                    }
+                }
+            }
+            for path in candidatePaths {
+                if fm.fileExists(atPath: path) {
+                    print("[StressTest]   Found WAL file at: \(path)")
+                    actualWalPath = path
+                }
+            }
+
+            if let walFilePath = actualWalPath, let walData = fm.contents(atPath: walFilePath), walData.count > 0 {
+                // Truncate WAL to 50% of original size
+                let originalSize = walData.count
+                let truncatedSize = originalSize / 2
+                let truncatedData = walData.prefix(truncatedSize)
+                try truncatedData.write(to: URL(fileURLWithPath: walFilePath))
+                print("[StressTest]   WAL corrupted: \(originalSize) bytes → \(truncatedSize) bytes (50% truncation)")
+            } else {
+                // WAL was cleared on close (forceCheckpointOnClose=true) or doesn't exist
+                // Create a synthetic corrupt WAL to simulate SIGKILL mid-write
+                print("[StressTest]   WAL file empty or not found after clean close — creating synthetic corrupt WAL")
+                // Write random bytes that look like a partially written WAL
+                var corruptData = Data(count: 4096)
+                corruptData.withUnsafeMutableBytes { ptr in
+                    // Write some header-like bytes then garbage
+                    let bytes = ptr.bindMemory(to: UInt8.self)
+                    for i in 0..<4096 {
+                        bytes[i] = UInt8(i % 256)
+                    }
+                }
+                try corruptData.write(to: URL(fileURLWithPath: walPath))
+                print("[StressTest]   Synthetic corrupt WAL written: 4096 bytes at \(walPath)")
+            }
+        }
+
+        // ── Session 3: Verify recovery (THE KEY TEST) ──
+        do {
+            let sessionStart = Date()
+            print("[StressTest] Session 3: Opening database after WAL corruption...")
+
+            let config = SystemConfig(
+                bufferPoolSize: 256 * 1024 * 1024,
+                maxNumThreads: 2,
+                autoCheckpoint: true,
+                checkpointThreshold: 16 * 1024 * 1024
+            )
+
+            // This MUST NOT throw — if it does, the test fails
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+            print("[StressTest]   Database opened successfully after WAL corruption ✓")
+
+            // Query count — should be >= 500 (checkpointed baseline)
+            let countResult = try conn.query("MATCH (n:TestNode) RETURN count(n);")
+            let countTuple = try countResult.getNext()!
+            let recoveredCount = try countTuple.getValue(0) as! Int64
+            XCTAssertGreaterThanOrEqual(recoveredCount, 500,
+                "Expected at least 500 nodes (checkpointed baseline), got \(recoveredCount)")
+            print("[StressTest]   Recovered node count: \(recoveredCount) (expected >= 500) ✓")
+
+            // Verify a specific checkpointed node
+            let nodeResult = try conn.query("MATCH (n:TestNode {id: 100}) RETURN n.data;")
+            let nodeTuple = try nodeResult.getNext()!
+            let nodeData = try nodeTuple.getValue(0) as? String
+            XCTAssertEqual(nodeData, "node_100", "Expected node_100 data, got \(nodeData ?? "nil")")
+            print("[StressTest]   Node id=100 data: \(nodeData ?? "nil") ✓")
+
+            let sessionElapsed = Date().timeIntervalSince(sessionStart)
+            print("[StressTest] Session 3 complete in \(String(format: "%.1f", sessionElapsed))s")
+        }
+
+        // ── Session 4: Verify DB is usable after recovery ──
+        do {
+            let sessionStart = Date()
+            print("[StressTest] Session 4: Verifying DB is usable after recovery...")
+
+            let config = SystemConfig(
+                bufferPoolSize: 256 * 1024 * 1024,
+                maxNumThreads: 2,
+                autoCheckpoint: true,
+                checkpointThreshold: 16 * 1024 * 1024
+            )
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+
+            // Get count before insert
+            let beforeResult = try conn.query("MATCH (n:TestNode) RETURN count(n);")
+            let beforeTuple = try beforeResult.getNext()!
+            let beforeCount = try beforeTuple.getValue(0) as! Int64
+
+            // Insert 100 new nodes (ids 10000-10099)
+            var rows = [String]()
+            for i in 10000..<10100 {
+                rows.append("{id: \(i), data: 'node_\(i)'}")
+            }
+            let query = "UNWIND [\(rows.joined(separator: ","))] AS row CREATE (:TestNode {id: row.id, data: row.data});"
+            _ = try conn.query(query)
+            print("[StressTest]   100 new nodes inserted (ids 10000-10099)")
+
+            // Verify count increased
+            let afterResult = try conn.query("MATCH (n:TestNode) RETURN count(n);")
+            let afterTuple = try afterResult.getNext()!
+            let afterCount = try afterTuple.getValue(0) as! Int64
+            XCTAssertEqual(afterCount, beforeCount + 100,
+                "Expected count to increase by 100: before=\(beforeCount), after=\(afterCount)")
+            print("[StressTest]   Count increased: \(beforeCount) → \(afterCount) ✓")
+
+            let sessionElapsed = Date().timeIntervalSince(sessionStart)
+            print("[StressTest] Session 4 complete in \(String(format: "%.1f", sessionElapsed))s")
+        }
+
+        // ── Session 5: Final persistence check ──
+        do {
+            let sessionStart = Date()
+            print("[StressTest] Session 5: Final persistence check...")
+
+            let config = SystemConfig(
+                bufferPoolSize: 256 * 1024 * 1024,
+                maxNumThreads: 2,
+                autoCheckpoint: true,
+                checkpointThreshold: 16 * 1024 * 1024
+            )
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+
+            // Verify node from Session 4 persisted
+            let result = try conn.query("MATCH (n:TestNode {id: 10050}) RETURN n.data;")
+            let tuple = try result.getNext()!
+            let data = try tuple.getValue(0) as? String
+            XCTAssertEqual(data, "node_10050", "Expected node_10050 data, got \(data ?? "nil")")
+            print("[StressTest]   Node id=10050 data: \(data ?? "nil") ✓")
+
+            let sessionElapsed = Date().timeIntervalSince(sessionStart)
+            print("[StressTest] Session 5 complete in \(String(format: "%.1f", sessionElapsed))s")
+        }
+
+        let totalElapsed = Date().timeIntervalSince(overallStart)
+        print("\n[StressTest] === CORRUPT WAL RECOVERY TEST SUMMARY ===")
+        print("[StressTest] Total time: \(String(format: "%.1f", totalElapsed))s")
+        print("[StressTest] 5 sessions completed successfully ✓")
+        print("[StressTest] Database recovered from corrupt WAL ✓")
+        print("[StressTest] Data integrity verified after recovery ✓")
+        print("[StressTest] New writes work after recovery ✓")
+        print("[StressTest] Persistence verified after recovery ✓")
+    }
+
+    // MARK: - Test 5: Concurrent Queries Under Memory Pressure
 
     func testConcurrentQueriesUnderMemoryPressure() throws {
         let dbPath = try StressTests.ensureSharedDB()
