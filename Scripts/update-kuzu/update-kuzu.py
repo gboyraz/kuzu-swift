@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 KUZU = "kuzu"
-REPO_URL = "https://github.com/kuzudb/kuzu.git"
+REPO_URL = "https://github.com/gboyraz/kuzu.git"
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 KUZU_ROOT_DIR = os.path.abspath(os.path.join(ROOT_DIR, KUZU))
 COLLECT_KUZU_SRC_SCRIPT_DIR = os.path.abspath(
@@ -42,7 +42,7 @@ Popen(
         KUZU_BRANCH,
         "--depth",
         "1",
-        "https://github.com/kuzudb/kuzu.git",
+        REPO_URL,
         KUZU_ROOT_DIR,
     ],
 ).wait()
