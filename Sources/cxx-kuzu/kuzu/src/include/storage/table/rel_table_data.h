@@ -110,6 +110,8 @@ public:
         return nodeGroups->getNodeGroupNoLock(nodeGroupIdx);
     }
 
+    void markChunkedGroupsAsUnused() { nodeGroups->markChunkedGroupsAsUnused(); }
+
     void rollbackGroupCollectionInsert(common::row_idx_t numRows_, bool isPersistent);
 
     common::RelDataDirection getDirection() const { return direction; }

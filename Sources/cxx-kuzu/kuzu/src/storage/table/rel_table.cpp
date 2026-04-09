@@ -434,6 +434,12 @@ void RelTable::commit(main::ClientContext* context, TableCatalogEntry* tableEntr
         }
     }
 
+    // Mark committed in-memory chunked groups as spillable so the Spiller can evict them
+    // to disk under memory pressure.
+    for (auto& relData : directedRelData) {
+        relData->markChunkedGroupsAsUnused();
+    }
+
     localRelTable.clear(*context->getMemoryManager());
 }
 

@@ -592,6 +592,9 @@ void NodeTable::commit(main::ClientContext* context, TableCatalogEntry* tableEnt
     // connected local rels. Directly removing them will cause shift of committed node offset,
     // leading to an inconsistent result with connected rels.
     nodeGroups->append(transaction, columnIDsToCommit, localNodeTable.getNodeGroups());
+    // Mark committed in-memory chunked groups as spillable so the Spiller can evict them
+    // to disk under memory pressure.
+    nodeGroups->markChunkedGroupsAsUnused();
     // 2. Set deleted flag for tuples that are deleted in local storage.
     row_idx_t numLocalRows = 0u;
     for (auto localNodeGroupIdx = 0u; localNodeGroupIdx < localNodeTable.getNumNodeGroups();

@@ -64,6 +64,8 @@ public:
         nodeGroups.replaceGroup(lock, nodeGroupIdx, std::move(group));
     }
 
+    void markChunkedGroupsAsUnused();
+
     void rollbackInsert(common::row_idx_t numRows_, bool updateNumRows = true);
 
     void clear() {

@@ -102,6 +102,19 @@ void NodeGroupCollection::append(const Transaction* transaction,
     }
 }
 
+void NodeGroupCollection::markChunkedGroupsAsUnused() {
+    const auto lock = nodeGroups.lock();
+    for (auto& nodeGroup : nodeGroups.getAllGroups(lock)) {
+        const auto numChunkedGroups = nodeGroup->getNumChunkedGroups();
+        for (node_group_idx_t i = 0; i < numChunkedGroups; i++) {
+            auto* chunkedGroup = nodeGroup->getChunkedNodeGroup(i);
+            if (chunkedGroup && chunkedGroup->getResidencyState() == ResidencyState::IN_MEMORY) {
+                chunkedGroup->setUnused(mm);
+            }
+        }
+    }
+}
+
 std::pair<offset_t, offset_t> NodeGroupCollection::appendToLastNodeGroupAndFlushWhenFull(
     MemoryManager& mm, Transaction* transaction, const std::vector<column_id_t>& columnIDs,
     ChunkedNodeGroup& chunkedGroup, PageAllocator& pageAllocator) {
