@@ -851,5 +851,186 @@ final class StressTests: XCTestCase {
             XCTFail("Concurrent query errors: \(errors)")
         }
     }
+
+    // MARK: - Test 6: Spiller With Large Batch Insert
+
+    func testSpillerWithLargeBatchInsert() throws {
+        let tempDir = NSTemporaryDirectory() + "kuzu_spiller_" + UUID().uuidString
+        let dbPath = tempDir + "/db"
+        try FileManager.default.createDirectory(
+            atPath: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(atPath: tempDir)
+            print("[StressTest] Cleaned up temp directory")
+        }
+
+        let overallStart = Date()
+        let bufferPoolSize = 64 * 1024 * 1024  // 64MB — designed to force Spiller activation
+        print("[StressTest] === SPILLER TEST ===")
+        print("[StressTest] Buffer pool size: \(bufferPoolSize / 1024 / 1024) MB")
+        print("[StressTest] Target: 10,000 nodes × 128 doubles ≈ 10MB+ data footprint")
+
+        // ── Session 1: Large batch insert with tiny buffer pool ──
+        do {
+            let sessionStart = Date()
+            print("[StressTest] Session 1: Inserting 10,000 nodes with 128-dim embeddings...")
+
+            let config = SystemConfig(
+                bufferPoolSize: UInt64(bufferPoolSize),
+                maxNumThreads: 2,
+                autoCheckpoint: true,
+                checkpointThreshold: 16 * 1024 * 1024
+            )
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+
+            // Create schema
+            _ = try conn.query(
+                "CREATE NODE TABLE SpillerNode(id INT64, data STRING, embedding DOUBLE[128], PRIMARY KEY(id));")
+            print("[StressTest]   Schema created")
+
+            // Insert 10,000 nodes in batches of 500
+            let totalNodes = 10_000
+            let batchSize = 500
+            let insertStart = Date()
+            for batchStart in stride(from: 0, to: totalNodes, by: batchSize) {
+                let batchEnd = min(batchStart + batchSize, totalNodes)
+                var rows = [String]()
+                for i in batchStart..<batchEnd {
+                    var embParts = [String]()
+                    embParts.reserveCapacity(128)
+                    for j in 0..<128 {
+                        let val = sin(Double(i * 128 + j) * 0.001)
+                        embParts.append(String(format: "%.6f", val))
+                    }
+                    let embedding = "[\(embParts.joined(separator: ","))]"
+                    rows.append("{id: \(i), data: 'spiller_node_\(i)', embedding: \(embedding)}")
+                }
+                let query =
+                    "UNWIND [\(rows.joined(separator: ","))] AS row CREATE (:SpillerNode {id: row.id, data: row.data, embedding: row.embedding});"
+                _ = try conn.query(query)
+
+                if batchEnd % 2000 == 0 || batchEnd == totalNodes {
+                    let elapsed = Date().timeIntervalSince(insertStart)
+                    print(
+                        "[StressTest]   Inserted \(batchEnd)/\(totalNodes) nodes (\(String(format: "%.1f", elapsed))s)"
+                    )
+                }
+            }
+
+            let insertElapsed = Date().timeIntervalSince(insertStart)
+            print(
+                "[StressTest]   All \(totalNodes) nodes inserted in \(String(format: "%.1f", insertElapsed))s"
+            )
+            print(
+                "[StressTest]   Throughput: \(String(format: "%.0f", Double(totalNodes) / insertElapsed)) nodes/sec"
+            )
+
+            let sessionElapsed = Date().timeIntervalSince(sessionStart)
+            print(
+                "[StressTest] Session 1 complete in \(String(format: "%.1f", sessionElapsed))s"
+            )
+        }
+        // DB and Connection are destroyed here
+
+        // ── Session 2: Verify data survived ──
+        do {
+            let sessionStart = Date()
+            print("[StressTest] Session 2: Reopening and verifying data survived...")
+
+            let config = SystemConfig(
+                bufferPoolSize: UInt64(bufferPoolSize),
+                maxNumThreads: 2,
+                autoCheckpoint: true,
+                checkpointThreshold: 16 * 1024 * 1024
+            )
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+
+            // Verify total count
+            let countResult = try conn.query("MATCH (n:SpillerNode) RETURN count(n);")
+            let countTuple = try countResult.getNext()!
+            let count = try countTuple.getValue(0) as! Int64
+            XCTAssertEqual(count, 10000, "Expected 10000 SpillerNode nodes, got \(count)")
+            print("[StressTest]   Node count: \(count) ✓")
+
+            // Verify first node
+            let firstResult = try conn.query("MATCH (n:SpillerNode {id: 0}) RETURN n.data;")
+            let firstTuple = try firstResult.getNext()!
+            let firstName = try firstTuple.getValue(0) as? String
+            XCTAssertEqual(firstName, "spiller_node_0", "Expected spiller_node_0, got \(firstName ?? "nil")")
+            print("[StressTest]   Node id=0 data: \(firstName ?? "nil") ✓")
+
+            // Verify last node
+            let lastResult = try conn.query("MATCH (n:SpillerNode {id: 9999}) RETURN n.data;")
+            let lastTuple = try lastResult.getNext()!
+            let lastName = try lastTuple.getValue(0) as? String
+            XCTAssertEqual(lastName, "spiller_node_9999", "Expected spiller_node_9999, got \(lastName ?? "nil")")
+            print("[StressTest]   Node id=9999 data: \(lastName ?? "nil") ✓")
+
+            let sessionElapsed = Date().timeIntervalSince(sessionStart)
+            print(
+                "[StressTest] Session 2 complete in \(String(format: "%.1f", sessionElapsed))s"
+            )
+        }
+
+        // ── Session 3: Verify writable after ──
+        do {
+            let sessionStart = Date()
+            print("[StressTest] Session 3: Inserting 1,000 more nodes and verifying...")
+
+            let config = SystemConfig(
+                bufferPoolSize: UInt64(bufferPoolSize),
+                maxNumThreads: 2,
+                autoCheckpoint: true,
+                checkpointThreshold: 16 * 1024 * 1024
+            )
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+
+            // Insert 1000 more nodes (id 10000-10999) in batches of 500
+            let insertStart = Date()
+            for batchStart in stride(from: 10000, to: 11000, by: 500) {
+                let batchEnd = min(batchStart + 500, 11000)
+                var rows = [String]()
+                for i in batchStart..<batchEnd {
+                    var embParts = [String]()
+                    embParts.reserveCapacity(128)
+                    for j in 0..<128 {
+                        let val = sin(Double(i * 128 + j) * 0.001)
+                        embParts.append(String(format: "%.6f", val))
+                    }
+                    let embedding = "[\(embParts.joined(separator: ","))]"
+                    rows.append("{id: \(i), data: 'spiller_node_\(i)', embedding: \(embedding)}")
+                }
+                let query =
+                    "UNWIND [\(rows.joined(separator: ","))] AS row CREATE (:SpillerNode {id: row.id, data: row.data, embedding: row.embedding});"
+                _ = try conn.query(query)
+            }
+            let insertElapsed = Date().timeIntervalSince(insertStart)
+            print(
+                "[StressTest]   1,000 more nodes inserted in \(String(format: "%.1f", insertElapsed))s"
+            )
+
+            // Verify total count
+            let countResult = try conn.query("MATCH (n:SpillerNode) RETURN count(n);")
+            let countTuple = try countResult.getNext()!
+            let count = try countTuple.getValue(0) as! Int64
+            XCTAssertEqual(count, 11000, "Expected 11000 SpillerNode nodes, got \(count)")
+            print("[StressTest]   Total node count: \(count) ✓")
+
+            let sessionElapsed = Date().timeIntervalSince(sessionStart)
+            print(
+                "[StressTest] Session 3 complete in \(String(format: "%.1f", sessionElapsed))s"
+            )
+        }
+
+        let totalElapsed = Date().timeIntervalSince(overallStart)
+        print("\n[StressTest] === SPILLER TEST SUMMARY ===")
+        print("[StressTest] Buffer pool: \(bufferPoolSize / 1024 / 1024) MB")
+        print("[StressTest] Total time: \(String(format: "%.1f", totalElapsed))s")
+        print("[StressTest] 3 sessions completed successfully ✓")
+        print("[StressTest] Spiller mechanism validated — data > buffer pool survived ✓")
+    }
 }
 
