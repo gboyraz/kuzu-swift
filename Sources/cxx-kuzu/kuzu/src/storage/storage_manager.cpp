@@ -248,6 +248,7 @@ void StorageManager::serialize(const Catalog& catalog, Serializer& ser) {
 
 void StorageManager::deserialize(main::ClientContext* context, const Catalog* catalog,
     Deserializer& deSer) {
+    tables.clear();
     std::string key;
     deSer.validateDebuggingInfo(key, "num_node_tables");
     uint64_t numNodeTables = 0;
