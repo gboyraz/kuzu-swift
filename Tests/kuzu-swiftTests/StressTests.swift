@@ -330,7 +330,250 @@ final class StressTests: XCTestCase {
         XCTAssertFalse(neighborIds.isEmpty)
     }
 
-    // MARK: - Test 3: Concurrent Queries Under Memory Pressure
+    // MARK: - Test 3: Database Reopen After Auto Checkpoint
+
+    func testDatabaseReopenAfterAutoCheckpoint() throws {
+        let tempDir = NSTemporaryDirectory() + "kuzu_reopen_" + UUID().uuidString
+        let dbPath = tempDir + "/db"
+        try FileManager.default.createDirectory(
+            atPath: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(atPath: tempDir)
+            print("[StressTest] Cleaned up temp directory")
+        }
+
+        let overallStart = Date()
+
+        // ── Session 1: Initial population ──
+        do {
+            let sessionStart = Date()
+            print("[StressTest] Session 1: Creating database and populating data...")
+
+            let config = SystemConfig(
+                bufferPoolSize: 256 * 1024 * 1024,
+                maxNumThreads: 2,
+                autoCheckpoint: true,
+                checkpointThreshold: 16 * 1024 * 1024
+            )
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+
+            // Create schema
+            _ = try conn.query(
+                "CREATE NODE TABLE Image(id INT64, path STRING, embedding DOUBLE[384], PRIMARY KEY(id));")
+            _ = try conn.query(
+                "CREATE REL TABLE VISUAL_SIMILARITY(FROM Image TO Image, score DOUBLE);")
+            print("[StressTest]   Schema created")
+
+            // Insert 5000 Image nodes in batches of 100
+            let batchSize = 100
+            let totalNodes = 5000
+            let insertStart = Date()
+            for batchStart in stride(from: 0, to: totalNodes, by: batchSize) {
+                let batchEnd = min(batchStart + batchSize, totalNodes)
+                var rows = [String]()
+                for i in batchStart..<batchEnd {
+                    var embParts = [String]()
+                    embParts.reserveCapacity(384)
+                    for j in 0..<384 {
+                        let val = sin(Double(i * 384 + j) * 0.001)
+                        embParts.append(String(format: "%.6f", val))
+                    }
+                    let embedding = "[\(embParts.joined(separator: ","))]"
+                    rows.append("{id: \(i), path: '/photos/\(i).jpg', embedding: \(embedding)}")
+                }
+                let query =
+                    "UNWIND [\(rows.joined(separator: ","))] AS row CREATE (:Image {id: row.id, path: row.path, embedding: row.embedding});"
+                _ = try conn.query(query)
+
+                if batchEnd % 1000 == 0 {
+                    let elapsed = Date().timeIntervalSince(insertStart)
+                    print(
+                        "[StressTest]   Inserted \(batchEnd)/\(totalNodes) nodes (\(String(format: "%.1f", elapsed))s)"
+                    )
+                }
+            }
+            let nodeElapsed = Date().timeIntervalSince(insertStart)
+            print(
+                "[StressTest]   All \(totalNodes) nodes inserted in \(String(format: "%.1f", nodeElapsed))s"
+            )
+
+            // Insert 2000 VISUAL_SIMILARITY edges in batches
+            let edgeStart = Date()
+            let totalEdges = 2000
+            let edgeBatchSize = 200
+            for batchStart in stride(from: 0, to: totalEdges, by: edgeBatchSize) {
+                let batchEnd = min(batchStart + edgeBatchSize, totalEdges)
+                var edgeRows = [String]()
+                for i in batchStart..<batchEnd {
+                    edgeRows.append("{f: \(i), t: \(i + 1)}")
+                }
+                let query =
+                    "UNWIND [\(edgeRows.joined(separator: ","))] AS e MATCH (a:Image {id: e.f}), (b:Image {id: e.t}) CREATE (a)-[:VISUAL_SIMILARITY {score: 0.95}]->(b);"
+                _ = try conn.query(query)
+            }
+            let edgeElapsed = Date().timeIntervalSince(edgeStart)
+            print(
+                "[StressTest]   \(totalEdges) edges inserted in \(String(format: "%.1f", edgeElapsed))s"
+            )
+
+            let sessionElapsed = Date().timeIntervalSince(sessionStart)
+            print(
+                "[StressTest] Session 1 complete in \(String(format: "%.1f", sessionElapsed))s"
+            )
+        }
+        // DB and Connection are destroyed here
+
+        // ── Session 2: Reopen, verify, write more ──
+        do {
+            let sessionStart = Date()
+            print("[StressTest] Session 2: Reopening database, verifying, and writing more...")
+
+            let config = SystemConfig(
+                bufferPoolSize: 256 * 1024 * 1024,
+                maxNumThreads: 2,
+                autoCheckpoint: true,
+                checkpointThreshold: 16 * 1024 * 1024
+            )
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+
+            // Verify Image count
+            let imgResult = try conn.query("MATCH (i:Image) RETURN COUNT(*);")
+            let imgTuple = try imgResult.getNext()!
+            let imgCount = try imgTuple.getValue(0) as! Int64
+            XCTAssertEqual(imgCount, 5000, "Expected 5000 Image nodes after Session 1, got \(imgCount)")
+            print("[StressTest]   Image count: \(imgCount) ✓")
+
+            // Verify edge count
+            let edgeResult = try conn.query(
+                "MATCH ()-[r:VISUAL_SIMILARITY]->() RETURN COUNT(r);")
+            let edgeTuple = try edgeResult.getNext()!
+            let edgeCount = try edgeTuple.getValue(0) as! Int64
+            XCTAssertEqual(
+                edgeCount, 2000,
+                "Expected 2000 VISUAL_SIMILARITY edges after Session 1, got \(edgeCount)")
+            print("[StressTest]   VISUAL_SIMILARITY count: \(edgeCount) ✓")
+
+            // Verify specific node
+            let nodeResult = try conn.query(
+                "MATCH (i:Image {id: 100}) RETURN i.path;")
+            let nodeTuple = try nodeResult.getNext()!
+            let nodePath = try nodeTuple.getValue(0) as? String
+            XCTAssertNotNil(nodePath, "Expected node id=100 to have a path")
+            print("[StressTest]   Node id=100 path: \(nodePath ?? "nil") ✓")
+
+            // Insert 1000 more Image nodes (id 5000-5999)
+            let insertStart = Date()
+            let batchSize = 100
+            for batchStart in stride(from: 5000, to: 6000, by: batchSize) {
+                let batchEnd = min(batchStart + batchSize, 6000)
+                var rows = [String]()
+                for i in batchStart..<batchEnd {
+                    var embParts = [String]()
+                    embParts.reserveCapacity(384)
+                    for j in 0..<384 {
+                        let val = sin(Double(i * 384 + j) * 0.001)
+                        embParts.append(String(format: "%.6f", val))
+                    }
+                    let embedding = "[\(embParts.joined(separator: ","))]"
+                    rows.append("{id: \(i), path: '/photos/\(i).jpg', embedding: \(embedding)}")
+                }
+                let query =
+                    "UNWIND [\(rows.joined(separator: ","))] AS row CREATE (:Image {id: row.id, path: row.path, embedding: row.embedding});"
+                _ = try conn.query(query)
+            }
+            let insertElapsed = Date().timeIntervalSince(insertStart)
+            print(
+                "[StressTest]   1000 more nodes inserted in \(String(format: "%.1f", insertElapsed))s"
+            )
+
+            // Insert 500 more VISUAL_SIMILARITY edges
+            let edgeStart = Date()
+            let edgeBatchSize = 100
+            for batchStart in stride(from: 2001, to: 2501, by: edgeBatchSize) {
+                let batchEnd = min(batchStart + edgeBatchSize, 2501)
+                var edgeRows = [String]()
+                for i in batchStart..<batchEnd {
+                    edgeRows.append("{f: \(i), t: \(i + 1)}")
+                }
+                let query =
+                    "UNWIND [\(edgeRows.joined(separator: ","))] AS e MATCH (a:Image {id: e.f}), (b:Image {id: e.t}) CREATE (a)-[:VISUAL_SIMILARITY {score: 0.95}]->(b);"
+                _ = try conn.query(query)
+            }
+            let edgeElapsed = Date().timeIntervalSince(edgeStart)
+            print(
+                "[StressTest]   500 more edges inserted in \(String(format: "%.1f", edgeElapsed))s"
+            )
+
+            let sessionElapsed = Date().timeIntervalSince(sessionStart)
+            print(
+                "[StressTest] Session 2 complete in \(String(format: "%.1f", sessionElapsed))s"
+            )
+        }
+        // DB and Connection are destroyed here
+
+        // ── Session 3: Final verification ──
+        do {
+            let sessionStart = Date()
+            print("[StressTest] Session 3: Final verification...")
+
+            let config = SystemConfig(
+                bufferPoolSize: 256 * 1024 * 1024,
+                maxNumThreads: 2,
+                autoCheckpoint: true,
+                checkpointThreshold: 16 * 1024 * 1024
+            )
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+
+            // Verify total Image count
+            let imgResult = try conn.query("MATCH (i:Image) RETURN COUNT(*);")
+            let imgTuple = try imgResult.getNext()!
+            let imgCount = try imgTuple.getValue(0) as! Int64
+            XCTAssertEqual(imgCount, 6000, "Expected 6000 Image nodes after Session 2, got \(imgCount)")
+            print("[StressTest]   Image count: \(imgCount) ✓")
+
+            // Verify total edge count
+            let edgeResult = try conn.query(
+                "MATCH ()-[r:VISUAL_SIMILARITY]->() RETURN COUNT(r);")
+            let edgeTuple = try edgeResult.getNext()!
+            let edgeCount = try edgeTuple.getValue(0) as! Int64
+            XCTAssertEqual(
+                edgeCount, 2500,
+                "Expected 2500 VISUAL_SIMILARITY edges after Session 2, got \(edgeCount)")
+            print("[StressTest]   VISUAL_SIMILARITY count: \(edgeCount) ✓")
+
+            // Verify old node (id=0) still accessible
+            let oldResult = try conn.query(
+                "MATCH (i:Image {id: 0}) RETURN i.path;")
+            let oldTuple = try oldResult.getNext()!
+            let oldPath = try oldTuple.getValue(0) as? String
+            XCTAssertNotNil(oldPath, "Expected old node id=0 to still be accessible")
+            print("[StressTest]   Old node id=0 path: \(oldPath ?? "nil") ✓")
+
+            // Verify new node (id=5500) accessible
+            let newResult = try conn.query(
+                "MATCH (i:Image {id: 5500}) RETURN i.path;")
+            let newTuple = try newResult.getNext()!
+            let newPath = try newTuple.getValue(0) as? String
+            XCTAssertNotNil(newPath, "Expected new node id=5500 to be accessible")
+            print("[StressTest]   New node id=5500 path: \(newPath ?? "nil") ✓")
+
+            let sessionElapsed = Date().timeIntervalSince(sessionStart)
+            print(
+                "[StressTest] Session 3 complete in \(String(format: "%.1f", sessionElapsed))s"
+            )
+        }
+
+        let totalElapsed = Date().timeIntervalSince(overallStart)
+        print("\n[StressTest] === REOPEN TEST SUMMARY ===")
+        print("[StressTest] Total time: \(String(format: "%.1f", totalElapsed))s")
+        print("[StressTest] 3 sessions completed successfully ✓")
+        print("[StressTest] Data integrity verified across close/reopen cycles ✓")
+    }
+
+    // MARK: - Test 4: Concurrent Queries Under Memory Pressure
 
     func testConcurrentQueriesUnderMemoryPressure() throws {
         let dbPath = try StressTests.ensureSharedDB()
