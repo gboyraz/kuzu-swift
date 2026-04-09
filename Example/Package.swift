@@ -8,7 +8,7 @@ let package = Package(
         .iOS(.v14),
     ],
     dependencies: [
-        .package(url: "https://github.com/kuzudb/kuzu-swift/", branch: "main"),
+        .package(url: "https://github.com/gboyraz/kuzu-swift/", branch: "main"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
