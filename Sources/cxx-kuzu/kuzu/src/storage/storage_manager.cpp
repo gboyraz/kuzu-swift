@@ -35,6 +35,13 @@ StorageManager::StorageManager(const std::string& databasePath, bool readOnly,
 StorageManager::~StorageManager() = default;
 
 void StorageManager::initDataFileHandle(VirtualFileSystem* vfs, main::ClientContext* context) {
+    if (dataFH) {
+        // During recovery, the FileHandle already exists. Instead of creating a
+        // duplicate (which would get a different fileIndex in BufferManager),
+        // just refresh numPages from the actual file size on disk.
+        dataFH->refreshNumPagesFromDisk();
+        return;
+    }
     if (inMemory) {
         dataFH = memoryManager.getBufferManager()->getFileHandle(databasePath,
             FileHandle::O_PERSISTENT_FILE_IN_MEM, vfs, context);

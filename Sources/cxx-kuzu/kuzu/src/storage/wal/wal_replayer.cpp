@@ -74,6 +74,10 @@ protected:
         shadowFile.flushAll();
         // Apply shadow pages directly to the data file WITHOUT logging to WAL.
         shadowFile.applyShadowPages(clientContext);
+        // Refresh the data file handle's numPages so it reflects any pages that
+        // were extended by applyShadowPages writing beyond the previous file size.
+        auto* dataFH = clientContext.getStorageManager()->getDataFH();
+        dataFH->refreshNumPagesFromDisk();
         // Clear shadow file buffers so they can be reused for the next transaction.
         auto bufferManager = clientContext.getMemoryManager()->getBufferManager();
         shadowFile.clear(*bufferManager);

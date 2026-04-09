@@ -174,5 +174,27 @@ void FileHandle::writePagesToFile(const uint8_t* buffer, uint64_t size,
     }
 }
 
+void FileHandle::refreshNumPagesFromDisk() {
+    std::unique_lock lck{fhSharedMutex, std::defer_lock_t{}};
+    while (!lck.try_lock()) {}
+    KU_ASSERT(fileInfo);
+    const auto fileLength = fileInfo->getFileSize();
+    const auto newNumPages =
+        static_cast<uint32_t>(ceil(static_cast<double>(fileLength) /
+                                   static_cast<double>(getPageSize())));
+    if (newNumPages <= numPages) {
+        return;
+    }
+    // Grow pageCapacity and register new frame groups as needed.
+    while (pageCapacity < newNumPages) {
+        addNewPageGroupWithoutLock();
+    }
+    // Reset page states for the new pages so they start as evicted.
+    for (auto i = numPages; i < newNumPages; i++) {
+        pageStates[i].resetToEvicted();
+    }
+    numPages = newNumPages;
+}
+
 } // namespace storage
 } // namespace kuzu

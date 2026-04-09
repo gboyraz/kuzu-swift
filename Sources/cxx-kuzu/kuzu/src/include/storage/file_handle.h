@@ -110,6 +110,11 @@ public:
 
     PageManager* getPageManager() { return pageManager.get(); }
 
+    // Re-reads the file size from disk and updates numPages, pageCapacity,
+    // pageStates, and frameGroupIdxes. Used after shadow pages are applied
+    // directly to the data file so that the FileHandle reflects the new size.
+    void refreshNumPagesFromDisk();
+
 private:
     bool isLargePaged() const { return fhFlags & isLargePagedMask; }
     bool isNewTmpFile() const { return fhFlags & isNewInMemoryTmpFileMask; }
