@@ -158,13 +158,14 @@ void WALReplayer::replay() const {
         }
     } catch (const std::exception&) {
         if (clientContext.getTransactionContext()->hasActiveTransaction()) {
-            // Handle the case that some transaction went during replaying. We should roll back
-            // under this case. Usually this shouldn't happen, but it is possible if we have a bug
-            // with the replay logic. This is to handle cases like that so we don't corrupt
-            // transactions that have been replayed.
             clientContext.getTransactionContext()->rollback();
         }
-        throw;
+        // The WAL or shadow file is corrupt (likely from an unclean shutdown such as
+        // SIGKILL, iOS memory pressure kill, or app crash). Discard the corrupt files
+        // and fall back to the last clean checkpoint. This may lose uncommitted
+        // transactions but is preferable to failing to open the database entirely.
+        removeWALAndShadowFiles();
+        checkpointer.readCheckpoint();
     }
 }
 
