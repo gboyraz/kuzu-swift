@@ -96,9 +96,6 @@ void WALReplayer::performRecoveryCheckpoint() const {
     try {
         RecoveryCheckpointer checkpointer(clientContext);
         checkpointer.writeRecoveryCheckpoint();
-        // After checkpoint, reload catalog and storage metadata from disk so that
-        // the next transaction's replay sees the freshly checkpointed state.
-        checkpointer.readCheckpoint();
     } catch (const std::exception&) {
         // If the intermediate checkpoint fails, we continue replaying. The data
         // is still safe in the WAL and will be fully replayed. We just won't get
