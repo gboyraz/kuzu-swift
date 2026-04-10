@@ -103,6 +103,23 @@ SpillResult Spiller::claimNextGroup() {
     return groupToFlush->spillToDisk();
 }
 
+SpillResult Spiller::spillUnusedGroups() {
+    std::vector<ChunkedNodeGroup*> groupsToFlush;
+    {
+        std::unique_lock lock(partitionerGroupsMtx);
+        groupsToFlush.assign(fullPartitionerGroups.begin(), fullPartitionerGroups.end());
+        fullPartitionerGroups.clear();
+    }
+    SpillResult totalResult{};
+    for (auto* group : groupsToFlush) {
+        auto result = group->spillToDisk();
+        totalResult.memoryFreed += result.memoryFreed;
+        totalResult.memoryNowEvictable += result.memoryNowEvictable;
+    }
+    totalBytesSpilled.fetch_add(totalResult.memoryFreed, std::memory_order_relaxed);
+    return totalResult;
+}
+
 // NOLINTNEXTLINE(readability-make-member-function-const): Function shouldn't be re-ordered
 void Spiller::clearFile() {
     auto curDataFH = getDataFH();

@@ -3,6 +3,8 @@
 #include <algorithm>
 
 #include "catalog/catalog_entry/rel_group_catalog_entry.h"
+#include "storage/buffer_manager/buffer_manager.h"
+#include "storage/buffer_manager/spiller.h"
 #include "common/exception/message.h"
 #include "common/exception/runtime.h"
 #include "main/client_context.h"
@@ -439,6 +441,9 @@ void RelTable::commit(main::ClientContext* context, TableCatalogEntry* tableEntr
     for (auto& relData : directedRelData) {
         relData->markChunkedGroupsAsUnused();
     }
+    // Proactively spill unused groups to disk to reclaim memory before buffer pool pressure builds.
+    memoryManager->getBufferManager()->getSpillerOrSkip(
+        [](auto& spiller) { spiller.spillUnusedGroups(); });
 
     localRelTable.clear(*context->getMemoryManager());
 }

@@ -1,6 +1,8 @@
 #include "storage/table/node_table.h"
 
 #include "catalog/catalog_entry/node_table_catalog_entry.h"
+#include "storage/buffer_manager/buffer_manager.h"
+#include "storage/buffer_manager/spiller.h"
 #include "common/cast.h"
 #include "common/exception/message.h"
 #include "common/exception/runtime.h"
@@ -595,6 +597,9 @@ void NodeTable::commit(main::ClientContext* context, TableCatalogEntry* tableEnt
     // Mark committed in-memory chunked groups as spillable so the Spiller can evict them
     // to disk under memory pressure.
     nodeGroups->markChunkedGroupsAsUnused();
+    // Proactively spill unused groups to disk to reclaim memory before buffer pool pressure builds.
+    memoryManager->getBufferManager()->getSpillerOrSkip(
+        [](auto& spiller) { spiller.spillUnusedGroups(); });
     // 2. Set deleted flag for tuples that are deleted in local storage.
     row_idx_t numLocalRows = 0u;
     for (auto localNodeGroupIdx = 0u; localNodeGroupIdx < localNodeTable.getNumNodeGroups();
