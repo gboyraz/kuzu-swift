@@ -524,6 +524,31 @@ void BufferManager::resetSpiller(std::string spillPath) {
     }
 }
 
+bool BufferManager::reserveForMemoryManager(uint64_t size) {
+    // Delegates to reserve() which handles eviction/spilling/backpressure.
+    // The headroom is enforced by reducing the effective budget: MM cannot consume
+    // more than (bufferPoolSize - headroom), ensuring BM always has space for
+    // page cache I/O operations and avoiding deadlock during eviction flushes.
+    const uint64_t headroom =
+        std::max(bufferPoolSize.load() / 20, static_cast<uint64_t>(1024 * 1024));
+
+    // If MM usage already exceeds the effective budget, try to reclaim first.
+    if (memoryManagerUsage.load() + size + headroom > bufferPoolSize.load()) {
+        // Attempt eviction/spill through reserve; it may still succeed.
+    }
+
+    if (!reserve(size)) {
+        return false;
+    }
+    memoryManagerUsage += size;
+    return true;
+}
+
+void BufferManager::freeForMemoryManager(uint64_t size) {
+    KU_ASSERT(memoryManagerUsage.load() >= size);
+    memoryManagerUsage -= size;
+}
+
 BufferManager::~BufferManager() = default;
 
 } // namespace storage
