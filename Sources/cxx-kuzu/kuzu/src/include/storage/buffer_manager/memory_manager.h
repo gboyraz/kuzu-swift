@@ -34,10 +34,7 @@ public:
     KUZU_API ~MemoryBuffer();
     DELETE_COPY_AND_MOVE(MemoryBuffer);
 
-    std::span<uint8_t> getBuffer() const {
-        KU_ASSERT(!evicted);
-        return buffer;
-    }
+    std::span<uint8_t> getBuffer() const { return buffer; }
     uint8_t* getData() const { return getBuffer().data(); }
 
     MemoryManager* getMemoryManager() const { return mm; }
