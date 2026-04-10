@@ -254,6 +254,7 @@ void BufferManager::optimisticRead(FileHandle& fileHandle, page_idx_t pageIdx,
 void BufferManager::unpin(FileHandle& fileHandle, page_idx_t pageIdx) {
     auto pageState = fileHandle.getPageState(pageIdx);
     pageState->unlock();
+    memoryFreed.store(true);
 }
 
 // evicts up to 64 pages and returns the space reclaimed
@@ -378,16 +379,27 @@ bool BufferManager::reserve(uint64_t sizeToReserve) {
             }
         }
         if (memoryClaimed == 0 && needMoreMemory()) {
-            if (failedCount++ < 2) {
-                // If we failed to find any memory to free, try waiting briefly for other threads to
-                // stop using memory
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if (failedCount++ < 10) {
+                // Exponential backoff: wait and check if memory was freed
+                auto waitMs = std::min(10 << failedCount, 500);
+                memoryFreed.store(false);
+                std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
             } else {
-                // Cannot find more pages to be evicted. Free the memory we reserved and return
-                // false.
-                freeUsedMemory(sizeToReserve + totalClaimedMemory);
-                nonEvictableMemory -= nonEvictableClaimedMemory;
-                return false;
+                // Final attempt: wait up to 5 seconds total with polling
+                bool found = false;
+                for (int i = 0; i < 50 && !found; i++) {  // 50 * 100ms = 5s
+                    memoryFreed.store(false);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    if (!needMoreMemory()) {
+                        found = true;
+                        failedCount = 0;
+                    }
+                }
+                if (!found) {
+                    freeUsedMemory(sizeToReserve + totalClaimedMemory);
+                    nonEvictableMemory -= nonEvictableClaimedMemory;
+                    return false;
+                }
             }
         }
         totalClaimedMemory += memoryClaimed;
@@ -498,7 +510,9 @@ void BufferManager::removePageFromFrame(FileHandle& fileHandle, page_idx_t pageI
 
 uint64_t BufferManager::freeUsedMemory(uint64_t size) {
     KU_ASSERT(usedMemory.load() >= size);
-    return usedMemory.fetch_sub(size);
+    auto prev = usedMemory.fetch_sub(size);
+    memoryFreed.store(true);
+    return prev;
 }
 
 void BufferManager::resetSpiller(std::string spillPath) {

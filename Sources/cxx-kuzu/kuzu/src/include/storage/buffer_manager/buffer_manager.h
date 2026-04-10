@@ -212,6 +212,7 @@ public:
 
     uint64_t getMemoryLimit() const { return bufferPoolSize; }
     uint64_t getUsedMemory() const { return usedMemory; }
+    uint64_t getBufferPoolSize() const { return bufferPoolSize; }
 
     void getSpillerOrSkip(std::function<void(Spiller&)> func) {
         if (spiller) {
@@ -292,6 +293,7 @@ private:
     std::vector<std::unique_ptr<FileHandle>> fileHandles;
     std::unique_ptr<Spiller> spiller;
     common::VirtualFileSystem* vfs;
+    std::atomic<bool> memoryFreed{false};
 };
 
 } // namespace storage
