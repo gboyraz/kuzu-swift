@@ -1299,5 +1299,170 @@ final class StressTests: XCTestCase {
         print("[100K Test] Buffer pool: 256 MB")
         print("[100K Test] ✅ Production scale test PASSED")
     }
+
+    // MARK: - Test: Production Scale 100K Nodes + 1M Edges
+
+    func testProductionScale100KWith1MEdges() throws {
+        let tempDir = NSTemporaryDirectory() + "kuzu_100k_1m_" + UUID().uuidString
+        let dbPath = tempDir + "/db"
+        try FileManager.default.createDirectory(
+            atPath: dbPath, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(atPath: tempDir)
+            NSLog("[Edge Test] Cleaned up temp directory")
+        }
+
+        let totalNodes = 100_000
+        let totalEdges = 1_000_000
+        let embDim = 128
+        let overallStart = Date()
+
+        let config = SystemConfig(
+            bufferPoolSize: 512 * 1024 * 1024,
+            maxNumThreads: 2,
+            autoCheckpoint: true,
+            checkpointThreshold: 64 * 1024 * 1024
+        )
+
+        NSLog("[Edge Test] Starting with 512MB buffer pool")
+
+        var nodeInsertTime: Double = 0
+        var edgeInsertTime: Double = 0
+
+        // ── Session 1: Insert nodes and edges ──
+        do {
+            let sessionStart = Date()
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+
+            // Create schema
+            _ = try conn.query(
+                "CREATE NODE TABLE ImageNode(id INT64, path STRING, embedding DOUBLE[\(embDim)], PRIMARY KEY(id));")
+            _ = try conn.query(
+                "CREATE REL TABLE SIMILAR_TO(FROM ImageNode TO ImageNode, score DOUBLE);")
+            NSLog("[Edge Test] Schema created")
+
+            // ── Insert 100K nodes in batches of 1000 ──
+            let batchSize = 1000
+            let insertStart = Date()
+            for batchStart in stride(from: 0, to: totalNodes, by: batchSize) {
+                let batchEnd = min(batchStart + batchSize, totalNodes)
+                var rows = [String]()
+                for i in batchStart..<batchEnd {
+                    var embParts = [String]()
+                    embParts.reserveCapacity(embDim)
+                    for j in 0..<embDim {
+                        let val = sin(Double(i * embDim + j) * 0.001)
+                        embParts.append(String(format: "%.6f", val))
+                    }
+                    let embedding = "[\(embParts.joined(separator: ","))]"
+                    rows.append("{id: \(i), path: 'image_\(i).jpg', embedding: \(embedding)}")
+                }
+                let query =
+                    "UNWIND [\(rows.joined(separator: ","))] AS row CREATE (:ImageNode {id: row.id, path: row.path, embedding: row.embedding});"
+                _ = try conn.query(query)
+
+                if batchEnd % 10_000 == 0 {
+                    _ = try conn.query("CHECKPOINT;")
+                    let elapsed = Date().timeIntervalSince(insertStart)
+                    NSLog("[Edge Test] Inserted %d/100000 nodes (%.1fs)", batchEnd, elapsed)
+                }
+            }
+            nodeInsertTime = Date().timeIntervalSince(insertStart)
+            NSLog("[Edge Test] ✅ All %d nodes inserted in %.1fs (%.0f nodes/sec)",
+                  totalNodes, nodeInsertTime, Double(totalNodes) / nodeInsertTime)
+
+            // ── Insert 1M edges in batches of 1000 ──
+            let edgeBatchSize = 1000
+            let edgeInsertStart = Date()
+            for batchStart in stride(from: 0, to: totalEdges, by: edgeBatchSize) {
+                let batchEnd = min(batchStart + edgeBatchSize, totalEdges)
+                var edgeRows = [String]()
+                for _ in batchStart..<batchEnd {
+                    let src = Int64.random(in: 0..<100000)
+                    let dst = (src + Int64.random(in: 1..<1000)) % 100000
+                    let score = Double.random(in: 0.0...1.0)
+                    edgeRows.append("{src: \(src), dst: \(dst), score: \(String(format: "%.6f", score))}")
+                }
+                let edgeQuery =
+                    "UNWIND [\(edgeRows.joined(separator: ","))] AS e MATCH (a:ImageNode), (b:ImageNode) WHERE a.id = e.src AND b.id = e.dst CREATE (a)-[:SIMILAR_TO {score: e.score}]->(b);"
+                _ = try conn.query(edgeQuery)
+
+                if batchEnd % 50_000 == 0 {
+                    _ = try conn.query("CHECKPOINT;")
+                    let elapsed = Date().timeIntervalSince(edgeInsertStart)
+                    NSLog("[Edge Test] Inserted %d/1000000 edges (%.1fs)", batchEnd, elapsed)
+                }
+            }
+            edgeInsertTime = Date().timeIntervalSince(edgeInsertStart)
+            NSLog("[Edge Test] ✅ All %d edges inserted in %.1fs (%.0f edges/sec)",
+                  totalEdges, edgeInsertTime, Double(totalEdges) / edgeInsertTime)
+
+            let sessionElapsed = Date().timeIntervalSince(sessionStart)
+            NSLog("[Edge Test] Session 1 complete in %.1fs", sessionElapsed)
+        }
+        // DB and Connection destroyed here
+
+        // ── Session 2: Reopen and verify ──
+        do {
+            NSLog("[Edge Test] Reopening DB...")
+            let reopenStart = Date()
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+            let reopenTime = Date().timeIntervalSince(reopenStart)
+            NSLog("[Edge Test] DB reopened in %.1fs", reopenTime)
+
+            // Verify node count
+            let countResult = try conn.query("MATCH (n:ImageNode) RETURN COUNT(*);")
+            let countTuple = try countResult.getNext()!
+            let count = try countTuple.getValue(0) as! Int64
+            XCTAssertEqual(count, Int64(totalNodes), "Expected \(totalNodes) nodes, got \(count)")
+            NSLog("[Edge Test] Node count verified: %lld ✓", count)
+
+            // Verify edge count
+            let edgeCountResult = try conn.query("MATCH ()-[r:SIMILAR_TO]->() RETURN count(r) AS c;")
+            let edgeCountTuple = try edgeCountResult.getNext()!
+            let edgeCount = try edgeCountTuple.getValue(0) as! Int64
+            NSLog("[Edge Test] Edge count: %lld", edgeCount)
+            XCTAssertEqual(edgeCount, Int64(totalEdges), "Expected \(totalEdges) edges, got \(edgeCount)")
+
+            // Run graph query
+            let graphResult = try conn.query(
+                "MATCH (a:ImageNode {id: 0})-[r:SIMILAR_TO]->(b) RETURN b.id, r.score ORDER BY r.score DESC LIMIT 5;")
+            NSLog("[Edge Test] Top 5 neighbors of node 0:")
+            while graphResult.hasNext() {
+                let tuple = try graphResult.getNext()!
+                let neighborId = try tuple.getValue(0) as! Int64
+                let score = try tuple.getValue(1) as! Double
+                NSLog("[Edge Test]   -> node %lld (score: %.4f)", neighborId, score)
+            }
+
+            // DB size report
+            let fm = FileManager.default
+            if let enumerator = fm.enumerator(atPath: dbPath) {
+                var totalSize: UInt64 = 0
+                while let file = enumerator.nextObject() as? String {
+                    let fullPath = (dbPath as NSString).appendingPathComponent(file)
+                    if let attrs = try? fm.attributesOfItem(atPath: fullPath) {
+                        totalSize += attrs[.size] as? UInt64 ?? 0
+                    }
+                }
+                NSLog("[Edge Test] DB directory size: %llu MB", totalSize / 1024 / 1024)
+            }
+
+            NSLog("[Edge Test] ✅ All data verified after reopen")
+        }
+
+        let totalElapsed = Date().timeIntervalSince(overallStart)
+        NSLog("\n[Edge Test] === SUMMARY ===")
+        NSLog("[Edge Test] Total time: %.1fs", totalElapsed)
+        NSLog("[Edge Test] Node insert time: %.1fs", nodeInsertTime)
+        NSLog("[Edge Test] Edge insert time: %.1fs", edgeInsertTime)
+        NSLog("[Edge Test] Nodes: %d, Edges: %d", totalNodes, totalEdges)
+        NSLog("[Edge Test] Nodes/sec: %.0f", Double(totalNodes) / nodeInsertTime)
+        NSLog("[Edge Test] Edges/sec: %.0f", Double(totalEdges) / edgeInsertTime)
+        NSLog("[Edge Test] Buffer pool: 512 MB")
+        NSLog("[Edge Test] ✅ Production scale 100K+1M edges test PASSED")
+    }
 }
 
