@@ -1,7 +1,10 @@
 #pragma once
 
+#include <algorithm>
+
 #include "common/string_utils.h"
 #include "common/type_utils.h"
+#include "storage/index/hash_index_utils.h"
 #include "storage/index/in_mem_hash_index.h"
 
 namespace kuzu {
@@ -12,6 +15,7 @@ namespace storage {
 class BaseHashIndexLocalStorage {
 public:
     virtual ~BaseHashIndexLocalStorage() = default;
+    virtual void flushPendingInserts() = 0;
 };
 
 enum class HashIndexLocalLookupState : uint8_t { KEY_FOUND, KEY_DELETED, KEY_NOT_EXIST };
@@ -26,13 +30,25 @@ public:
     using OwnedType = InMemHashIndex<T>::OwnedType;
     using KeyType = InMemHashIndex<T>::KeyType;
 
+    static constexpr uint32_t BATCH_FLUSH_SIZE = 4096;
+
     explicit HashIndexLocalStorage(MemoryManager& memoryManager, OverflowFileHandle* handle)
-        : localDeletions{}, localInsertions{memoryManager, handle} {}
+        : localDeletions{}, localInsertions{memoryManager, handle} {
+        pendingInserts.reserve(BATCH_FLUSH_SIZE);
+    }
+
     HashIndexLocalLookupState lookup(KeyType key, common::offset_t& result,
         visible_func isVisible) {
         std::shared_lock sLock{mtx};
         if (localDeletions.contains(key)) {
             return HashIndexLocalLookupState::KEY_DELETED;
+        }
+        // Check pending buffer first
+        for (auto& [pendingKey, pendingOffset] : pendingInserts) {
+            if (pendingKey == key && isVisible(pendingOffset)) {
+                result = pendingOffset;
+                return HashIndexLocalLookupState::KEY_FOUND;
+            }
         }
         if (localInsertions.lookup(key, result, isVisible)) {
             return HashIndexLocalLookupState::KEY_FOUND;
@@ -42,6 +58,13 @@ public:
 
     void deleteKey(KeyType key) {
         std::unique_lock xLock{mtx};
+        // Check pending buffer first
+        for (auto it = pendingInserts.begin(); it != pendingInserts.end(); ++it) {
+            if (it->first == key) {
+                pendingInserts.erase(it);
+                return;
+            }
+        }
         if (!localInsertions.deleteKey(key)) {
             localDeletions.insert(static_cast<OwnedType>(key));
         }
@@ -49,16 +72,45 @@ public:
 
     bool discard(KeyType key) {
         std::unique_lock xLock{mtx};
+        // Check pending buffer first
+        for (auto it = pendingInserts.begin(); it != pendingInserts.end(); ++it) {
+            if (it->first == key) {
+                pendingInserts.erase(it);
+                return true;
+            }
+        }
         return localInsertions.deleteKey(key);
     }
 
     bool insert(OwnedType&& key, common::offset_t value, visible_func isVisible) {
         std::unique_lock xLock{mtx};
-        auto iter = localDeletions.find(key);
-        if (iter != localDeletions.end()) {
-            localDeletions.erase(iter);
+        // Check for duplicate in pending buffer
+        for (auto& [pendingKey, pendingOffset] : pendingInserts) {
+            if (pendingKey == key && isVisible(pendingOffset)) {
+                return false;
+            }
         }
-        return localInsertions.append(std::move(key), value, isVisible);
+        // Check for duplicate in already-flushed insertions
+        common::offset_t tmpResult = 0;
+        if (localInsertions.lookup(key, tmpResult, isVisible)) {
+            return false;
+        }
+        auto deletionIter = localDeletions.find(key);
+        if (deletionIter != localDeletions.end()) {
+            localDeletions.erase(deletionIter);
+        }
+        // Buffer the insert
+        pendingInserts.emplace_back(std::move(key), value);
+        if (pendingInserts.size() >= BATCH_FLUSH_SIZE) {
+            flushPendingInsertsNoLock();
+        }
+        return true;
+    }
+
+    // Flush pending inserts sorted by hash bucket for cache-friendly access
+    void flushPendingInserts() override {
+        std::unique_lock xLock{mtx};
+        flushPendingInsertsNoLock();
     }
 
     void reserveSpaceForAppend(uint32_t numNewEntries) {
@@ -91,23 +143,27 @@ public:
 
     bool hasUpdates() {
         std::shared_lock sLock{mtx};
-        return !(localInsertions.empty() && localDeletions.empty());
+        return !(localInsertions.empty() && localDeletions.empty() && pendingInserts.empty());
     }
 
     int64_t getNetInserts() {
         std::shared_lock sLock{mtx};
-        return static_cast<int64_t>(localInsertions.size()) - localDeletions.size();
+        return static_cast<int64_t>(localInsertions.size()) +
+               static_cast<int64_t>(pendingInserts.size()) - localDeletions.size();
     }
 
     void clear() {
         std::unique_lock xLock{mtx};
+        pendingInserts.clear();
         localInsertions.clear();
         localDeletions.clear();
     }
 
     void applyLocalChanges(const std::function<void(KeyType)>& deleteOp,
         const std::function<void(const InMemHashIndex<T>&)>& insertOp) {
-        std::shared_lock sLock{mtx};
+        std::unique_lock xLock{mtx};
+        // Flush any pending inserts before applying changes
+        flushPendingInsertsNoLock();
         for (auto& key : localDeletions) {
             deleteOp(key);
         }
@@ -125,6 +181,27 @@ public:
     }
 
 private:
+    void flushPendingInsertsNoLock() {
+        if (pendingInserts.empty()) {
+            return;
+        }
+        // Sort by hash to group entries targeting the same slot together,
+        // improving cache locality when inserting into InMemHashIndex
+        std::sort(pendingInserts.begin(), pendingInserts.end(),
+            [](const std::pair<OwnedType, common::offset_t>& a,
+                const std::pair<OwnedType, common::offset_t>& b) {
+                return HashIndexUtils::hash(a.first) < HashIndexUtils::hash(b.first);
+            });
+        // Reserve space for all pending entries at once
+        localInsertions.reserveSpaceForAppend(pendingInserts.size());
+        // Bulk insert — always visible since these are local uncommitted entries
+        for (auto& [key, offset] : pendingInserts) {
+            localInsertions.append(std::move(key), offset,
+                [](common::offset_t) { return true; });
+        }
+        pendingInserts.clear();
+    }
+
     // When the storage type is string, allow the key type to be string_view with a custom hash
     // function
     using hash_function = std::conditional_t<std::is_same_v<OwnedType, std::string>,
@@ -132,6 +209,8 @@ private:
     std::shared_mutex mtx;
     std::unordered_set<OwnedType, hash_function, std::equal_to<>> localDeletions;
     InMemHashIndex<T> localInsertions;
+    // Pending inserts buffer — flushed in sorted order for cache-friendly hash index access
+    std::vector<std::pair<OwnedType, common::offset_t>> pendingInserts;
 };
 
 class LocalHashIndex {
@@ -224,6 +303,9 @@ public:
         common::ku_dynamic_cast<HashIndexLocalStorage<HashIndexType<T>>*>(localIndex.get())
             ->deleteKey(key);
     }
+
+    // Flush any buffered pending inserts to the underlying InMemHashIndex
+    void flushPendingInserts() { localIndex->flushPendingInserts(); }
 
 private:
     common::PhysicalTypeID keyDataTypeID;
