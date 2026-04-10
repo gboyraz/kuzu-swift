@@ -378,10 +378,10 @@ bool BufferManager::reserve(uint64_t sizeToReserve) {
             }
         }
         if (memoryClaimed == 0 && needMoreMemory()) {
-            if (failedCount++ < 2) {
-                // If we failed to find any memory to free, try waiting briefly for other threads to
-                // stop using memory
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if (failedCount++ < 10) {
+                // Exponential backoff: 10, 20, 40, 80, 160, 320, 500, 500, 500, 500 ms
+                auto waitMs = std::min(10 << failedCount, 500);
+                std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
             } else {
                 // Cannot find more pages to be evicted. Free the memory we reserved and return
                 // false.
