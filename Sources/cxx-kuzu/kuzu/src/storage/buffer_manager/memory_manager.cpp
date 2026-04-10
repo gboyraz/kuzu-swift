@@ -6,6 +6,7 @@
 #include "common/file_system/virtual_file_system.h"
 #include "common/types/types.h"
 #include "storage/buffer_manager/buffer_manager.h"
+#include "storage/buffer_manager/spiller.h"
 #include "storage/file_handle.h"
 
 using namespace kuzu::common;
@@ -50,6 +51,13 @@ MemoryManager::MemoryManager(BufferManager* bm, VirtualFileSystem* vfs) : bm{bm}
 }
 
 std::span<uint8_t> MemoryManager::mallocBuffer(bool initializeToZero, uint64_t size) {
+    // Don't let MemoryManager consume more than 75% of buffer pool.
+    // Reserve at least 25% for page cache I/O operations.
+    auto maxMemManagerBudget = bm->getBufferPoolSize() * 3 / 4;
+    if (bm->getUsedMemory() > maxMemManagerBudget) {
+        // Try to free memory via spiller before proceeding
+        bm->getSpillerOrSkip([](Spiller& spiller) { spiller.claimNextGroup(); });
+    }
     if (!bm->reserve(size)) {
         throw BufferManagerException(
             "Unable to allocate memory! The buffer pool is full and no memory could be freed!");
@@ -78,6 +86,14 @@ std::unique_ptr<MemoryBuffer> MemoryManager::allocateBuffer(bool initializeToZer
             pageIdx = freePages.top();
             freePages.pop();
         }
+    }
+    // Don't let MemoryManager consume more than 75% of buffer pool.
+    // Reserve at least 25% for page cache I/O operations.
+    auto maxMemManagerBudget = bm->getBufferPoolSize() * 3 / 4;
+    if (bm->getUsedMemory() > maxMemManagerBudget) {
+        // Try to free memory via spiller before proceeding
+        bm->getSpillerOrSkip([](Spiller& spiller) { spiller.claimNextGroup(); });
+        // The pin() -> reserve() call below will handle backpressure via condition variable wait
     }
     auto buffer = bm->pin(*fh, pageIdx, PageReadPolicy::DONT_READ_PAGE);
     auto memoryBuffer = std::make_unique<MemoryBuffer>(this, pageIdx, buffer);
