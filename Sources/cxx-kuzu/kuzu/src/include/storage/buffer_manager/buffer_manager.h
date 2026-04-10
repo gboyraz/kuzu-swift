@@ -213,6 +213,10 @@ public:
     uint64_t getMemoryLimit() const { return bufferPoolSize; }
     uint64_t getUsedMemory() const { return usedMemory; }
     uint64_t getBufferPoolSize() const { return bufferPoolSize; }
+    double getUsageRatio() const {
+        auto poolSize = bufferPoolSize.load();
+        return poolSize > 0 ? static_cast<double>(usedMemory.load()) / poolSize : 0.0;
+    }
 
     // Unified memory budget: MemoryManager allocation tracking.
     // Reserves memory from the shared budget for MemoryManager (malloc-based) allocations.

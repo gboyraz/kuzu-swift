@@ -21,6 +21,7 @@ static ConfigurationOption options[] = { // NOLINT(cert-err58-cpp):
     GET_CONFIGURATION(ProgressBarSetting), GET_CONFIGURATION(RecursivePatternSemanticSetting),
     GET_CONFIGURATION(RecursivePatternFactorSetting), GET_CONFIGURATION(EnableMVCCSetting),
     GET_CONFIGURATION(CheckpointThresholdSetting), GET_CONFIGURATION(AutoCheckpointSetting),
+    GET_CONFIGURATION(AdaptiveCheckpointSetting),
     GET_CONFIGURATION(ForceCheckpointClosingDBSetting), GET_CONFIGURATION(SpillToDiskSetting),
     GET_CONFIGURATION(EnableOptimizerSetting), GET_CONFIGURATION(EnableInternalCatalogSetting)};
 
@@ -28,7 +29,7 @@ DBConfig::DBConfig(const SystemConfig& systemConfig)
     : bufferPoolSize{systemConfig.bufferPoolSize}, maxNumThreads{systemConfig.maxNumThreads},
       enableCompression{systemConfig.enableCompression}, readOnly{systemConfig.readOnly},
       maxDBSize{systemConfig.maxDBSize}, enableMultiWrites{false},
-      autoCheckpoint{systemConfig.autoCheckpoint},
+      autoCheckpoint{systemConfig.autoCheckpoint}, adaptiveCheckpoint{true},
       checkpointThreshold{systemConfig.checkpointThreshold},
       forceCheckpointOnClose{systemConfig.forceCheckpointOnClose}, enableSpillingToDisk{true} {
 #if defined(__APPLE__)

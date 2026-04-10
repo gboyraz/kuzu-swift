@@ -208,6 +208,18 @@ struct AutoCheckpointSetting {
     }
 };
 
+struct AdaptiveCheckpointSetting {
+    static constexpr auto name = "adaptive_checkpoint";
+    static constexpr auto inputType = common::LogicalTypeID::BOOL;
+    static void setContext(ClientContext* context, const common::Value& parameter) {
+        parameter.validateType(inputType);
+        context->getDBConfigUnsafe()->adaptiveCheckpoint = parameter.getValue<bool>();
+    }
+    static common::Value getSetting(const ClientContext* context) {
+        return common::Value(context->getDBConfig()->adaptiveCheckpoint);
+    }
+};
+
 struct ForceCheckpointClosingDBSetting {
     static constexpr auto name = "force_checkpoint_on_close";
     static constexpr auto inputType = common::LogicalTypeID::BOOL;
