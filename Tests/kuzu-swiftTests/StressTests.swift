@@ -1342,56 +1342,50 @@ final class StressTests: XCTestCase {
                 "CREATE REL TABLE SIMILAR_TO(FROM ImageNode TO ImageNode, score DOUBLE);")
             NSLog("[Edge Test] Schema created")
 
-            // ── Insert 100K nodes in batches of 1000 ──
-            let batchSize = 1000
+            // ── Insert 100K nodes using prepared statement ──
+            let nodeStmt = try conn.prepare(
+                "CREATE (:ImageNode {id: $id, path: $path, embedding: $embedding})")
             let insertStart = Date()
-            for batchStart in stride(from: 0, to: totalNodes, by: batchSize) {
-                let batchEnd = min(batchStart + batchSize, totalNodes)
-                var rows = [String]()
-                for i in batchStart..<batchEnd {
-                    var embParts = [String]()
-                    embParts.reserveCapacity(embDim)
-                    for j in 0..<embDim {
-                        let val = sin(Double(i * embDim + j) * 0.001)
-                        embParts.append(String(format: "%.6f", val))
-                    }
-                    let embedding = "[\(embParts.joined(separator: ","))]"
-                    rows.append("{id: \(i), path: 'image_\(i).jpg', embedding: \(embedding)}")
+            for i in 0..<totalNodes {
+                let embedding: [Double] = (0..<embDim).map { j in
+                    sin(Double(i * embDim + j) * 0.001)
                 }
-                let query =
-                    "UNWIND [\(rows.joined(separator: ","))] AS row CREATE (:ImageNode {id: row.id, path: row.path, embedding: row.embedding});"
-                _ = try conn.query(query)
+                let params: [String: Any?] = [
+                    "id": Int64(i),
+                    "path": "image_\(i).jpg",
+                    "embedding": embedding,
+                ]
+                _ = try conn.execute(nodeStmt, params)
 
-                if batchEnd % 10_000 == 0 {
+                if (i + 1) % 10_000 == 0 {
                     _ = try conn.query("CHECKPOINT;")
                     let elapsed = Date().timeIntervalSince(insertStart)
-                    NSLog("[Edge Test] Inserted %d/100000 nodes (%.1fs)", batchEnd, elapsed)
+                    NSLog("[Edge Test] Inserted %d/100000 nodes (%.1fs)", i + 1, elapsed)
                 }
             }
             nodeInsertTime = Date().timeIntervalSince(insertStart)
             NSLog("[Edge Test] ✅ All %d nodes inserted in %.1fs (%.0f nodes/sec)",
                   totalNodes, nodeInsertTime, Double(totalNodes) / nodeInsertTime)
 
-            // ── Insert 1M edges in batches of 1000 ──
-            let edgeBatchSize = 1000
+            // ── Insert 1M edges using prepared statement ──
+            let edgeStmt = try conn.prepare(
+                "MATCH (a:ImageNode {id: $src}), (b:ImageNode {id: $dst}) CREATE (a)-[:SIMILAR_TO {score: $score}]->(b)")
             let edgeInsertStart = Date()
-            for batchStart in stride(from: 0, to: totalEdges, by: edgeBatchSize) {
-                let batchEnd = min(batchStart + edgeBatchSize, totalEdges)
-                var edgeRows = [String]()
-                for _ in batchStart..<batchEnd {
-                    let src = Int64.random(in: 0..<100000)
-                    let dst = (src + Int64.random(in: 1..<1000)) % 100000
-                    let score = Double.random(in: 0.0...1.0)
-                    edgeRows.append("{src: \(src), dst: \(dst), score: \(String(format: "%.6f", score))}")
-                }
-                let edgeQuery =
-                    "UNWIND [\(edgeRows.joined(separator: ","))] AS e MATCH (a:ImageNode), (b:ImageNode) WHERE a.id = e.src AND b.id = e.dst CREATE (a)-[:SIMILAR_TO {score: e.score}]->(b);"
-                _ = try conn.query(edgeQuery)
+            for i in 0..<totalEdges {
+                let src = Int64.random(in: 0..<100000)
+                let dst = (src + Int64.random(in: 1..<1000)) % 100000
+                let score = Double.random(in: 0.0...1.0)
+                let params: [String: Any?] = [
+                    "src": src,
+                    "dst": dst,
+                    "score": score,
+                ]
+                _ = try conn.execute(edgeStmt, params)
 
-                if batchEnd % 50_000 == 0 {
+                if (i + 1) % 50_000 == 0 {
                     _ = try conn.query("CHECKPOINT;")
                     let elapsed = Date().timeIntervalSince(edgeInsertStart)
-                    NSLog("[Edge Test] Inserted %d/1000000 edges (%.1fs)", batchEnd, elapsed)
+                    NSLog("[Edge Test] Inserted %d/1000000 edges (%.1fs)", i + 1, elapsed)
                 }
             }
             edgeInsertTime = Date().timeIntervalSince(edgeInsertStart)
