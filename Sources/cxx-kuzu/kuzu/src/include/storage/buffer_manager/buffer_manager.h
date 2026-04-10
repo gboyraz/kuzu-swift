@@ -28,6 +28,13 @@ namespace storage {
 class ChunkedNodeGroup;
 class Spiller;
 
+// Eviction metrics per page category.
+struct EvictionMetrics {
+    std::atomic<uint64_t> evictionAttempts{0};
+    std::atomic<uint64_t> evictionHits{0};
+    std::atomic<uint64_t> evictionMisses{0};
+};
+
 // This class keeps state info for pages potentially can be evicted.
 // The page state of a candidate is set to be MARKED when it is first enqueued. After enqueued, if
 // the candidate was recently accessed, it is no longer immediately evictable. See the state
@@ -213,6 +220,30 @@ public:
     uint64_t getMemoryLimit() const { return bufferPoolSize; }
     uint64_t getUsedMemory() const { return usedMemory; }
     uint64_t getBufferPoolSize() const { return bufferPoolSize; }
+    double getUsageRatio() const {
+        auto poolSize = bufferPoolSize.load();
+        return poolSize > 0 ? static_cast<double>(usedMemory.load()) / poolSize : 0.0;
+    }
+
+    // Eviction metrics accessors.
+    const EvictionMetrics& getEvictionMetrics(PageCategory category) const {
+        return evictionMetrics[static_cast<uint8_t>(category)];
+    }
+
+    // Unified memory budget: MemoryManager allocation tracking.
+    // Reserves memory from the shared budget for MemoryManager (malloc-based) allocations.
+    // Uses a small headroom reserve to avoid deadlock when BM eviction needs MM internally.
+    bool reserveForMemoryManager(uint64_t size);
+    // Releases memory back to the shared budget when MemoryManager frees memory.
+    void freeForMemoryManager(uint64_t size);
+    // Returns memory currently used by MemoryManager allocations.
+    uint64_t getMemoryManagerUsage() const { return memoryManagerUsage; }
+    // Returns memory currently used by BufferManager page cache (total - MM usage).
+    uint64_t getBufferManagerUsage() const {
+        auto total = usedMemory.load();
+        auto mm = memoryManagerUsage.load();
+        return total > mm ? total - mm : 0;
+    }
 
     void getSpillerOrSkip(std::function<void(Spiller&)> func) {
         if (spiller) {
@@ -221,6 +252,10 @@ public:
     }
 
     void resetSpiller(std::string spillPath);
+
+    // Dynamically resize the buffer pool. If shrinking, triggers eviction to free pages
+    // above the new limit. If growing, simply raises the limit.
+    void resizeBufferPool(uint64_t newSize);
 
     // This function only works when run in a single-threaded context
     // Iterates through the eviction queue and removes any elements that have already been evicted
@@ -287,6 +322,8 @@ private:
     std::atomic<uint64_t> usedMemory;
     // Amount of memory used, which cannot be evicted
     std::atomic<uint64_t> nonEvictableMemory;
+    // Memory used by MemoryManager (malloc-based) allocations, subset of usedMemory
+    std::atomic<uint64_t> memoryManagerUsage{0};
     // Each VMRegion corresponds to a virtual memory region of a specific page size. Currently, we
     // hold two sizes of REGULAR_PAGE and TEMP_PAGE.
     std::array<std::unique_ptr<VMRegion>, 2> vmRegions;
@@ -294,6 +331,8 @@ private:
     std::unique_ptr<Spiller> spiller;
     common::VirtualFileSystem* vfs;
     std::atomic<bool> memoryFreed{false};
+    // Per-category eviction metrics.
+    std::array<EvictionMetrics, NUM_PAGE_CATEGORIES> evictionMetrics;
 };
 
 } // namespace storage

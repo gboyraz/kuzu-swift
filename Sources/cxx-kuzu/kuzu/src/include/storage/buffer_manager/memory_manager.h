@@ -5,6 +5,7 @@
 #include <mutex>
 #include <stack>
 
+#include "common/assert.h"
 #include "common/system_config.h"
 #include "common/types/types.h"
 #include "storage/buffer_manager/spill_result.h"

@@ -257,10 +257,15 @@ void BufferManager::unpin(FileHandle& fileHandle, page_idx_t pageIdx) {
     memoryFreed.store(true);
 }
 
-// evicts up to 64 pages and returns the space reclaimed
+// evicts up to 64 pages and returns the space reclaimed.
+// Uses priority-based two-pass eviction: first tries DATA and TEMP pages,
+// then falls back to INDEX pages if insufficient memory is freed.
 uint64_t BufferManager::evictPages() {
-    std::array<std::atomic<EvictionCandidate>*, EvictionQueue::BATCH_SIZE> evictionCandidates{};
-    size_t evictablePages = 0;
+    // Separate arrays for low-priority (DATA/TEMP) and high-priority (INDEX) candidates.
+    std::array<std::atomic<EvictionCandidate>*, EvictionQueue::BATCH_SIZE> lowPriorityCandidates{};
+    std::array<std::atomic<EvictionCandidate>*, EvictionQueue::BATCH_SIZE> highPriorityCandidates{};
+    size_t lowPriorityCount = 0;
+    size_t highPriorityCount = 0;
     uint64_t claimedMemory = 0;
 
     // Try each page at least twice.
@@ -271,29 +276,59 @@ uint64_t BufferManager::evictPages() {
     // regardless of how many threads are trying to evict.
     auto startCursor = evictionQueue.getEvictionCursor();
     auto failureLimit = evictionQueue.getCapacity() * 2;
-    while (evictablePages == 0 && evictionQueue.getEvictionCursor() - startCursor < failureLimit) {
+    while (lowPriorityCount == 0 && highPriorityCount == 0 &&
+           evictionQueue.getEvictionCursor() - startCursor < failureLimit) {
         for (auto& candidate : evictionQueue.next()) {
             auto evictionCandidate = candidate.load();
             if (evictionCandidate == EvictionQueue::EMPTY) {
                 continue;
             }
             KU_ASSERT(evictionCandidate.fileIdx < fileHandles.size());
-            auto* pageState =
-                fileHandles[evictionCandidate.fileIdx]->getPageState(evictionCandidate.pageIdx);
+            auto& fh = *fileHandles[evictionCandidate.fileIdx];
+            auto* pageState = fh.getPageState(evictionCandidate.pageIdx);
             auto pageStateAndVersion = pageState->getStateAndVersion();
+            auto category = fh.getPageCategory();
+            evictionMetrics[static_cast<uint8_t>(category)].evictionAttempts++;
             if (!evictionCandidate.isEvictable(pageStateAndVersion)) {
                 if (evictionCandidate.isSecondChanceEvictable(pageStateAndVersion)) {
                     pageState->tryMark(pageStateAndVersion);
                 }
+                evictionMetrics[static_cast<uint8_t>(category)].evictionMisses++;
                 continue;
             }
-            evictionCandidates[evictablePages++] = &candidate;
+            // Sort candidates by priority: DATA/TEMP go to low-priority (evict first),
+            // INDEX goes to high-priority (evict only if needed).
+            if (category == PageCategory::INDEX) {
+                highPriorityCandidates[highPriorityCount++] = &candidate;
+            } else {
+                lowPriorityCandidates[lowPriorityCount++] = &candidate;
+            }
         }
     }
 
-    for (size_t i = 0; i < evictablePages; i++) {
-        claimedMemory += tryEvictPage(*evictionCandidates[i]);
+    // First pass: evict low-priority (DATA/TEMP) pages.
+    for (size_t i = 0; i < lowPriorityCount; i++) {
+        // Capture category before tryEvictPage clears the candidate.
+        auto candidate = lowPriorityCandidates[i]->load();
+        auto cat = fileHandles[candidate.fileIdx]->getPageCategory();
+        auto evicted = tryEvictPage(*lowPriorityCandidates[i]);
+        if (evicted > 0) {
+            evictionMetrics[static_cast<uint8_t>(cat)].evictionHits++;
+        }
+        claimedMemory += evicted;
     }
+
+    // Second pass: if insufficient, evict high-priority (INDEX) pages.
+    if (claimedMemory == 0) {
+        for (size_t i = 0; i < highPriorityCount; i++) {
+            auto evicted = tryEvictPage(*highPriorityCandidates[i]);
+            if (evicted > 0) {
+                evictionMetrics[static_cast<uint8_t>(PageCategory::INDEX)].evictionHits++;
+            }
+            claimedMemory += evicted;
+        }
+    }
+
     return claimedMemory;
 }
 
@@ -521,6 +556,76 @@ void BufferManager::resetSpiller(std::string spillPath) {
         spiller = nullptr;
     } else {
         spiller = std::make_unique<Spiller>(spillPath, *this, vfs);
+    }
+}
+
+bool BufferManager::reserveForMemoryManager(uint64_t size) {
+    // MM allocations are non-evictable: they must never trigger the Spiller.
+    // Triggering the Spiller from MM allocation can cause self-eviction — the Spiller
+    // frees MemoryBuffers (via claimNextGroup → spillToDisk) that may still be in use
+    // by the same operation, leading to use-after-free / SIGSEGV in getBuffer().
+    //
+    // Instead, we track MM usage in the unified budget and evict only BM pages
+    // (via evictPages) to make room. If eviction alone cannot free enough, we fail.
+    const uint64_t headroom =
+        std::max(bufferPoolSize.load() / 20, static_cast<uint64_t>(1024 * 1024));
+
+    // Pre-reserve the memory in usedMemory (same pattern as reserve()).
+    usedMemory += size;
+
+    uint64_t totalClaimedMemory = 0;
+    uint8_t failedCount = 0;
+    const auto needMoreMemory = [&]() {
+        return size > totalClaimedMemory &&
+               usedMemory.load() + headroom > bufferPoolSize.load() + totalClaimedMemory;
+    };
+
+    // Evict BM pages only — never trigger Spiller from MM allocations.
+    while (needMoreMemory()) {
+        uint64_t memoryClaimed = evictPages();
+        if (memoryClaimed > 0) {
+            totalClaimedMemory += memoryClaimed;
+        } else {
+            if (failedCount++ < 10) {
+                auto waitMs = std::min(10 << failedCount, 500);
+                memoryFreed.store(false);
+                std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+            } else {
+                // Cannot free enough BM pages. Revert and fail.
+                if (totalClaimedMemory > 0) {
+                    freeUsedMemory(totalClaimedMemory);
+                }
+                usedMemory -= size;
+                return false;
+            }
+        }
+    }
+    if (totalClaimedMemory > 0) {
+        freeUsedMemory(totalClaimedMemory);
+    }
+    memoryManagerUsage += size;
+    return true;
+}
+
+void BufferManager::freeForMemoryManager(uint64_t size) {
+    KU_ASSERT(memoryManagerUsage.load() >= size);
+    memoryManagerUsage -= size;
+}
+
+void BufferManager::resizeBufferPool(uint64_t newSize) {
+    auto oldSize = bufferPoolSize.load();
+    if (newSize == oldSize) {
+        return;
+    }
+    bufferPoolSize.store(newSize);
+    if (newSize < oldSize) {
+        // Trigger eviction sweeps until used memory is within the new limit
+        while (usedMemory.load() > newSize) {
+            auto freed = evictPages();
+            if (freed == 0) {
+                break; // Can't evict any more pages
+            }
+        }
     }
 }
 

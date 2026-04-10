@@ -33,6 +33,11 @@ Transaction::Transaction(main::ClientContext& clientContext, TransactionType tra
     undoBuffer = std::make_unique<storage::UndoBuffer>(clientContext.getMemoryManager());
     currentTS = common::Timestamp::getCurrentTimestamp().value;
     localWAL = std::make_unique<storage::LocalWAL>(*clientContext.getMemoryManager());
+    // Enable mid-transaction WAL flushing to bound memory usage for write transactions
+    // on disk-based databases.
+    if (isWriteTransaction() && !clientContext.isInMemory()) {
+        localWAL->setFlushContext(clientContext.getWAL(), &clientContext);
+    }
 }
 
 Transaction::Transaction(TransactionType transactionType) noexcept

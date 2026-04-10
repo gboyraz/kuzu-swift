@@ -8,6 +8,7 @@
 #include "common/serializer/deserializer.h"
 #include "common/serializer/in_mem_file_writer.h"
 #include "extension/extension_manager.h"
+#include "main/client_context.h"
 #include "main/db_config.h"
 #include "storage/buffer_manager/buffer_manager.h"
 #include "storage/shadow_utils.h"
@@ -215,8 +216,28 @@ bool Checkpointer::canAutoCheckpoint(const main::ClientContext& clientContext,
         return false;
     }
     auto wal = clientContext.getWAL();
-    const auto expectedSize = transaction.getLocalWAL().getSize() + wal->getFileSize();
-    return expectedSize > clientContext.getDBConfig()->checkpointThreshold;
+    const auto walSize = transaction.getLocalWAL().getSize() + wal->getFileSize();
+
+    // Adaptive checkpoint: adjust threshold based on buffer pool utilization.
+    if (clientContext.getDBConfig()->adaptiveCheckpoint) {
+        auto* bm = clientContext.getMemoryManager()->getBufferManager();
+        const auto poolUsage = bm->getUsageRatio();
+        const auto poolSize = bm->getBufferPoolSize();
+
+        if (poolUsage > 0.90) {
+            // Emergency: checkpoint immediately regardless of WAL size.
+            return true;
+        } else if (poolUsage > 0.75) {
+            // High pressure: checkpoint if WAL exceeds 10% of pool.
+            return walSize > poolSize / 10;
+        } else if (poolUsage > 0.60) {
+            // Moderate pressure: checkpoint if WAL exceeds 25% of pool.
+            return walSize > poolSize / 4;
+        }
+        // Low pressure (< 50%): fall through to static threshold for backward compat.
+    }
+
+    return walSize > clientContext.getDBConfig()->checkpointThreshold;
 }
 
 static void validateStorageVersion(common::Deserializer& deSer) {

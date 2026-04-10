@@ -27,6 +27,7 @@ public:
     SpillResult claimNextGroup();
     // Must only be used once all chunks have been loaded from disk.
     void clearFile();
+    uint64_t getTotalBytesSpilled() const { return totalBytesSpilled.load(); }
     ~Spiller();
 
 private:
@@ -41,6 +42,7 @@ private:
     std::atomic<FileHandle*> dataFH;
     std::mutex partitionerGroupsMtx;
     mutable std::mutex fileCreationMutex;
+    std::atomic<uint64_t> totalBytesSpilled{0};
 };
 
 } // namespace storage

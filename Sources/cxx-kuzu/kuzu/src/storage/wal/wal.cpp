@@ -30,6 +30,19 @@ void WAL::logCommittedWAL(LocalWAL& localWAL, main::ClientContext* context) {
     flushAndSyncNoLock();
 }
 
+void WAL::flushLocalWALNoCommit(LocalWAL& localWAL, main::ClientContext* context) {
+    KU_ASSERT(!readOnly);
+    // Note: caller (LocalWAL::flushIfNeededNoLock) already holds localWAL.mtx,
+    // so we access writer->getSize() directly instead of localWAL.getSize().
+    if (inMemory || localWAL.writer->getSize() == 0) {
+        return;
+    }
+    std::unique_lock lck{mtx};
+    initWriter(context);
+    localWAL.writer->flush(*writer);
+    flushAndSyncNoLock();
+}
+
 void WAL::logAndFlushCheckpoint(main::ClientContext* context) {
     std::unique_lock lck{mtx};
     initWriter(context);

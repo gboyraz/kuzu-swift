@@ -103,6 +103,8 @@ SpillResult Spiller::claimNextGroup() {
     return groupToFlush->spillToDisk();
 }
 
+
+
 // NOLINTNEXTLINE(readability-make-member-function-const): Function shouldn't be re-ordered
 void Spiller::clearFile() {
     auto curDataFH = getDataFH();

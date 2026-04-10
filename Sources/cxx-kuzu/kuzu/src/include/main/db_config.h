@@ -62,6 +62,7 @@ struct DBConfig {
     uint64_t maxDBSize;
     bool enableMultiWrites;
     bool autoCheckpoint;
+    bool adaptiveCheckpoint;
     uint64_t checkpointThreshold;
     bool forceCheckpointOnClose;
     bool enableSpillingToDisk;

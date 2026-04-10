@@ -26,7 +26,12 @@ MemoryBuffer::~MemoryBuffer() {
 }
 
 SpillResult MemoryBuffer::setSpilledToDisk(uint64_t filePosition) {
+    auto bufferSize = buffer.size();
     mm->freeBlock(pageIdx, buffer);
+    // Track MM deallocation for unified budget when spilling malloc'd buffers.
+    if (pageIdx == INVALID_PAGE_IDX) {
+        mm->getBufferManager()->freeForMemoryManager(bufferSize);
+    }
     // reinterpret_cast isn't allowed here, but we shouldn't leave the invalid pointer and
     // still want to store the size
     buffer = std::span(static_cast<uint8_t*>(nullptr), buffer.size());
@@ -51,16 +56,9 @@ MemoryManager::MemoryManager(BufferManager* bm, VirtualFileSystem* vfs) : bm{bm}
 }
 
 std::span<uint8_t> MemoryManager::mallocBuffer(bool initializeToZero, uint64_t size) {
-    /* TEMPORARILY COMMENTED OUT for regression testing — Task 3 budget check
-    // Don't let MemoryManager consume more than 75% of buffer pool.
-    // Reserve at least 25% for page cache I/O operations.
-    auto maxMemManagerBudget = bm->getBufferPoolSize() * 3 / 4;
-    if (bm->getUsedMemory() > maxMemManagerBudget) {
-        // Try to free memory via spiller before proceeding
-        bm->getSpillerOrSkip([](Spiller& spiller) { spiller.claimNextGroup(); });
-    }
-    */
-    if (!bm->reserve(size)) {
+    // Use unified budget: reserveForMemoryManager tracks MM usage separately
+    // and enforces headroom so BM always has space for page cache operations.
+    if (!bm->reserveForMemoryManager(size)) {
         throw BufferManagerException(
             "Unable to allocate memory! The buffer pool is full and no memory could be freed!");
     }
@@ -75,36 +73,12 @@ std::span<uint8_t> MemoryManager::mallocBuffer(bool initializeToZero, uint64_t s
 }
 
 std::unique_ptr<MemoryBuffer> MemoryManager::allocateBuffer(bool initializeToZero, uint64_t size) {
-    if (size != TEMP_PAGE_SIZE) [[unlikely]] {
-        auto buffer = mallocBuffer(initializeToZero, size);
-        return std::make_unique<MemoryBuffer>(this, INVALID_PAGE_IDX, buffer.data(), size);
-    }
-    page_idx_t pageIdx = INVALID_PAGE_IDX;
-    {
-        std::scoped_lock<std::mutex> lock(allocatorLock);
-        if (freePages.empty()) {
-            pageIdx = fh->addNewPage();
-        } else {
-            pageIdx = freePages.top();
-            freePages.pop();
-        }
-    }
-    /* TEMPORARILY COMMENTED OUT for regression testing — Task 3 budget check
-    // Don't let MemoryManager consume more than 75% of buffer pool.
-    // Reserve at least 25% for page cache I/O operations.
-    auto maxMemManagerBudget = bm->getBufferPoolSize() * 3 / 4;
-    if (bm->getUsedMemory() > maxMemManagerBudget) {
-        // Try to free memory via spiller before proceeding
-        bm->getSpillerOrSkip([](Spiller& spiller) { spiller.claimNextGroup(); });
-        // The pin() -> reserve() call below will handle backpressure via condition variable wait
-    }
-    */
-    auto buffer = bm->pin(*fh, pageIdx, PageReadPolicy::DONT_READ_PAGE);
-    auto memoryBuffer = std::make_unique<MemoryBuffer>(this, pageIdx, buffer);
-    if (initializeToZero) {
-        memset(memoryBuffer->getBuffer().data(), 0, pageSize);
-    }
-    return memoryBuffer;
+    // All MM allocations use mallocBuffer() which goes through reserveForMemoryManager().
+    // This ensures the Spiller is never triggered from MM allocations — MemoryBuffers must
+    // never be evicted/spilled. The previous TEMP_PAGE_SIZE path used pin() → reserve()
+    // which could trigger spiller->claimNextGroup(), bypassing this protection.
+    auto buffer = mallocBuffer(initializeToZero, size);
+    return std::make_unique<MemoryBuffer>(this, INVALID_PAGE_IDX, buffer.data(), size);
 }
 
 void MemoryManager::freeBlock(page_idx_t pageIdx, std::span<uint8_t> buffer) {
@@ -117,6 +91,8 @@ void MemoryManager::freeBlock(page_idx_t pageIdx, std::span<uint8_t> buffer) {
 
 void MemoryManager::updateUsedMemoryForFreedBlock(page_idx_t pageIdx, std::span<uint8_t> buffer) {
     if (pageIdx == INVALID_PAGE_IDX) {
+        // Unified budget: track MM deallocation separately.
+        bm->freeForMemoryManager(buffer.size());
         bm->freeUsedMemory(buffer.size());
         bm->nonEvictableMemory -= buffer.size();
     } else {
