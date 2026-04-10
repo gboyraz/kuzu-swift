@@ -13,6 +13,9 @@ class ValueVector;
 namespace catalog {
 class CatalogEntry;
 } // namespace catalog
+namespace main {
+class ClientContext;
+} // namespace main
 
 namespace storage {
 class WAL;
@@ -20,7 +23,16 @@ class LocalWAL {
     friend class WAL;
 
 public:
+    // Default threshold for mid-transaction WAL flush: 32MB.
+    static constexpr uint64_t DEFAULT_WAL_FLUSH_THRESHOLD = 32 * 1024 * 1024;
+
     explicit LocalWAL(MemoryManager& mm);
+
+    // Set the global WAL and client context for mid-transaction flushing.
+    // When the in-memory WAL size exceeds the threshold, buffered records are
+    // flushed to the global WAL file to bound memory usage.
+    void setFlushContext(WAL* globalWAL, main::ClientContext* context,
+        uint64_t flushThreshold = DEFAULT_WAL_FLUSH_THRESHOLD);
 
     void logCreateCatalogEntryRecord(catalog::CatalogEntry* catalogEntry, bool isInternal);
     void logDropCatalogEntryRecord(uint64_t tableID, catalog::CatalogEntryType type);
@@ -51,11 +63,18 @@ public:
 
 private:
     void addNewWALRecord(const WALRecord& walRecord);
+    // Flush buffered WAL records to the global WAL file if size exceeds threshold.
+    // Must be called with mtx held.
+    void flushIfNeededNoLock();
 
 private:
     std::mutex mtx;
     std::shared_ptr<common::InMemFileWriter> writer;
     std::unique_ptr<common::Serializer> serializer;
+    // Mid-transaction flush context (optional — only set for write transactions on disk DBs).
+    WAL* globalWAL = nullptr;
+    main::ClientContext* clientContext = nullptr;
+    uint64_t walFlushThreshold = DEFAULT_WAL_FLUSH_THRESHOLD;
 };
 
 } // namespace storage

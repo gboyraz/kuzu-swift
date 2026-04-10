@@ -16,6 +16,10 @@ public:
     ~WAL();
 
     void logCommittedWAL(LocalWAL& localWAL, main::ClientContext* context);
+    // Flush local WAL records to the WAL file without writing a commit marker.
+    // Used for mid-transaction memory bounding: writes buffered records to disk
+    // so the LocalWAL can reclaim its in-memory pages.
+    void flushLocalWALNoCommit(LocalWAL& localWAL, main::ClientContext* context);
     void logAndFlushCheckpoint(main::ClientContext* context);
 
     // Clear any buffer in the WAL writer. Also truncate the WAL file to 0 bytes.

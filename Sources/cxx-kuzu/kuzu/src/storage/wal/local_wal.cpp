@@ -5,6 +5,7 @@
 #include "common/serializer/in_mem_file_writer.h"
 #include "common/serializer/serializer.h"
 #include "common/vector/value_vector.h"
+#include "storage/wal/wal.h"
 
 using namespace kuzu::catalog;
 using namespace kuzu::common;
@@ -16,6 +17,14 @@ namespace storage {
 LocalWAL::LocalWAL(MemoryManager& mm) {
     writer = std::make_shared<InMemFileWriter>(mm);
     serializer = std::make_unique<Serializer>(writer);
+}
+
+void LocalWAL::setFlushContext(WAL* globalWAL_, main::ClientContext* context,
+    uint64_t flushThreshold) {
+    std::unique_lock lck{mtx};
+    globalWAL = globalWAL_;
+    clientContext = context;
+    walFlushThreshold = flushThreshold;
 }
 
 void LocalWAL::logBeginTransaction() {
@@ -105,6 +114,20 @@ void LocalWAL::addNewWALRecord(const WALRecord& walRecord) {
     std::unique_lock lck{mtx};
     KU_ASSERT(walRecord.type != WALRecordType::INVALID_RECORD);
     walRecord.serialize(*serializer);
+    flushIfNeededNoLock();
+}
+
+// NOLINTNEXTLINE(readability-make-member-function-const): semantically non-const function.
+void LocalWAL::flushIfNeededNoLock() {
+    if (!globalWAL || !clientContext) {
+        return;
+    }
+    if (writer->getSize() >= walFlushThreshold) {
+        // Flush buffered in-memory WAL records to the global WAL file on disk,
+        // then clear the in-memory buffer to reclaim memory.
+        globalWAL->flushLocalWALNoCommit(*this, clientContext);
+        writer->clear();
+    }
 }
 
 } // namespace storage
