@@ -1306,7 +1306,7 @@ final class StressTests: XCTestCase {
         let tempDir = NSTemporaryDirectory() + "kuzu_100k_1m_" + UUID().uuidString
         let dbPath = tempDir + "/db"
         try FileManager.default.createDirectory(
-            atPath: dbPath, withIntermediateDirectories: true)
+            atPath: tempDir, withIntermediateDirectories: true)
         defer {
             try? FileManager.default.removeItem(atPath: tempDir)
             NSLog("[Edge Test] Cleaned up temp directory")
