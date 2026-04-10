@@ -28,6 +28,13 @@ namespace storage {
 class ChunkedNodeGroup;
 class Spiller;
 
+// Eviction metrics per page category.
+struct EvictionMetrics {
+    std::atomic<uint64_t> evictionAttempts{0};
+    std::atomic<uint64_t> evictionHits{0};
+    std::atomic<uint64_t> evictionMisses{0};
+};
+
 // This class keeps state info for pages potentially can be evicted.
 // The page state of a candidate is set to be MARKED when it is first enqueued. After enqueued, if
 // the candidate was recently accessed, it is no longer immediately evictable. See the state
@@ -218,6 +225,11 @@ public:
         return poolSize > 0 ? static_cast<double>(usedMemory.load()) / poolSize : 0.0;
     }
 
+    // Eviction metrics accessors.
+    const EvictionMetrics& getEvictionMetrics(PageCategory category) const {
+        return evictionMetrics[static_cast<uint8_t>(category)];
+    }
+
     // Unified memory budget: MemoryManager allocation tracking.
     // Reserves memory from the shared budget for MemoryManager (malloc-based) allocations.
     // Uses a small headroom reserve to avoid deadlock when BM eviction needs MM internally.
@@ -315,6 +327,8 @@ private:
     std::unique_ptr<Spiller> spiller;
     common::VirtualFileSystem* vfs;
     std::atomic<bool> memoryFreed{false};
+    // Per-category eviction metrics.
+    std::array<EvictionMetrics, NUM_PAGE_CATEGORIES> evictionMetrics;
 };
 
 } // namespace storage

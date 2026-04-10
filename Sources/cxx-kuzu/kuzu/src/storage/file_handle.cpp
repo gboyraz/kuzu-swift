@@ -17,8 +17,12 @@ FileHandle::FileHandle(const std::string& path, uint8_t fhFlags, BufferManager* 
       frameGroupIdxes{0, 0}, pageManager(std::make_unique<PageManager>(this)) {
     if (isNewTmpFile()) {
         constructTmpFileHandle(path);
+        pageCategory_ = PageCategory::TEMP;
     } else {
         constructPersistentFileHandle(path, vfs, context);
+        // Categorize by file path suffix: shadow files get DATA priority (same as data),
+        // while the default is DATA. Index category must be set explicitly by callers.
+        pageCategory_ = PageCategory::DATA;
     }
     pageStates = ConcurrentVector<PageState, StorageConstants::PAGE_GROUP_SIZE,
         TEMP_PAGE_SIZE / sizeof(void*)>{numPages, pageCapacity};

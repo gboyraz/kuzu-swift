@@ -28,6 +28,16 @@ class VirtualFileSystem;
 }
 
 namespace storage {
+
+// Page category for priority-based eviction.
+// Lower numeric value = evicted first (lower priority to keep in memory).
+enum class PageCategory : uint8_t {
+    DATA = 0,  // Regular data pages — evict first
+    TEMP = 1,  // Temporary/spiller pages
+    INDEX = 2, // Index pages — evict last (most valuable to keep cached)
+};
+static constexpr uint8_t NUM_PAGE_CATEGORIES = 3;
+
 // FileHandle serves several purposes:
 // 1) holds basic state information of a file, including FileInfo, flags, pageSize,
 // numPages, and pageCapacity.
@@ -110,6 +120,10 @@ public:
 
     PageManager* getPageManager() { return pageManager.get(); }
 
+    // Page category for priority-based eviction. Default is DATA.
+    PageCategory getPageCategory() const { return pageCategory_; }
+    void setPageCategory(PageCategory category) { pageCategory_ = category; }
+
     // Re-reads the file size from disk and updates numPages, pageCapacity,
     // pageStates, and frameGroupIdxes. Used after shadow pages are applied
     // directly to the data file so that the FileHandle reflects the new size.
@@ -171,6 +185,8 @@ private:
     common::ConcurrentVector<common::page_group_idx_t> frameGroupIdxes;
 
     std::unique_ptr<PageManager> pageManager;
+    // Page category for priority-based eviction.
+    PageCategory pageCategory_ = PageCategory::DATA;
 };
 
 } // namespace storage
