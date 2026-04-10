@@ -51,6 +51,7 @@ MemoryManager::MemoryManager(BufferManager* bm, VirtualFileSystem* vfs) : bm{bm}
 }
 
 std::span<uint8_t> MemoryManager::mallocBuffer(bool initializeToZero, uint64_t size) {
+    /* TEMPORARILY COMMENTED OUT for regression testing — Task 3 budget check
     // Don't let MemoryManager consume more than 75% of buffer pool.
     // Reserve at least 25% for page cache I/O operations.
     auto maxMemManagerBudget = bm->getBufferPoolSize() * 3 / 4;
@@ -58,6 +59,7 @@ std::span<uint8_t> MemoryManager::mallocBuffer(bool initializeToZero, uint64_t s
         // Try to free memory via spiller before proceeding
         bm->getSpillerOrSkip([](Spiller& spiller) { spiller.claimNextGroup(); });
     }
+    */
     if (!bm->reserve(size)) {
         throw BufferManagerException(
             "Unable to allocate memory! The buffer pool is full and no memory could be freed!");
@@ -87,6 +89,7 @@ std::unique_ptr<MemoryBuffer> MemoryManager::allocateBuffer(bool initializeToZer
             freePages.pop();
         }
     }
+    /* TEMPORARILY COMMENTED OUT for regression testing — Task 3 budget check
     // Don't let MemoryManager consume more than 75% of buffer pool.
     // Reserve at least 25% for page cache I/O operations.
     auto maxMemManagerBudget = bm->getBufferPoolSize() * 3 / 4;
@@ -95,6 +98,7 @@ std::unique_ptr<MemoryBuffer> MemoryManager::allocateBuffer(bool initializeToZer
         bm->getSpillerOrSkip([](Spiller& spiller) { spiller.claimNextGroup(); });
         // The pin() -> reserve() call below will handle backpressure via condition variable wait
     }
+    */
     auto buffer = bm->pin(*fh, pageIdx, PageReadPolicy::DONT_READ_PAGE);
     auto memoryBuffer = std::make_unique<MemoryBuffer>(this, pageIdx, buffer);
     if (initializeToZero) {

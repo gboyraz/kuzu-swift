@@ -1119,5 +1119,185 @@ final class StressTests: XCTestCase {
             print("[ScaleTest] \(sizeName): Max successful = \(maxSuccessful) nodes")
         }
     }
+
+    // MARK: - Test: Production Scale 100K Nodes
+
+    func testProductionScale100K() throws {
+        let tempDir = NSTemporaryDirectory() + "kuzu_100k_" + UUID().uuidString
+        let dbPath = tempDir + "/db"
+        let csvDir = tempDir + "/csv"
+        try FileManager.default.createDirectory(
+            atPath: csvDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(atPath: tempDir)
+            print("[100K Test] Cleaned up temp directory")
+        }
+
+        let totalNodes = 100_000
+        let embDim = 128
+        let overallStart = Date()
+
+        // ── Generate CSV ──
+        do {
+            let csvStart = Date()
+            let csvPath = "\(csvDir)/image_nodes.csv"
+            FileManager.default.createFile(atPath: csvPath, contents: nil)
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: csvPath))
+            defer { handle.closeFile() }
+
+            for i in 0..<totalNodes {
+                var embParts = [String]()
+                embParts.reserveCapacity(embDim)
+                for j in 0..<embDim {
+                    let val = sin(Double(i * embDim + j) * 0.001)
+                    embParts.append(String(format: "%.6f", val))
+                }
+                let embedding = "[\(embParts.joined(separator: ","))]"
+                let line = "\(i),image_\(i).jpg,\"\(embedding)\"\n"
+                handle.write(line.data(using: .utf8)!)
+
+                if (i + 1) % 10_000 == 0 {
+                    let elapsed = Date().timeIntervalSince(csvStart)
+                    print("[100K Test] CSV: \(i + 1)/\(totalNodes) rows (\(String(format: "%.1f", elapsed))s)")
+                }
+            }
+            let csvElapsed = Date().timeIntervalSince(csvStart)
+            print("[100K Test] CSV generation done in \(String(format: "%.1f", csvElapsed))s")
+
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: csvPath) {
+                let size = attrs[.size] as? UInt64 ?? 0
+                print("[100K Test] CSV file size: \(size / 1024 / 1024) MB")
+            }
+        }
+
+        let config = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,  // 256MB — realistic iOS config
+            maxNumThreads: 2,
+            autoCheckpoint: true,
+            checkpointThreshold: 64 * 1024 * 1024  // 64MB
+        )
+
+        print("[100K Test] Starting with 256MB buffer pool")
+
+        // ── Session 1: Batch insert via UNWIND + verify ──
+        do {
+            let sessionStart = Date()
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+
+            _ = try conn.query(
+                "CREATE NODE TABLE ImageNode(id INT64, path STRING, embedding DOUBLE[\(embDim)], PRIMARY KEY(id));")
+            print("[100K Test] Schema created")
+
+            let batchSize = 1000
+            let insertStart = Date()
+            for batchStart in stride(from: 0, to: totalNodes, by: batchSize) {
+                let batchEnd = min(batchStart + batchSize, totalNodes)
+                var rows = [String]()
+                for i in batchStart..<batchEnd {
+                    var embParts = [String]()
+                    embParts.reserveCapacity(embDim)
+                    for j in 0..<embDim {
+                        let val = sin(Double(i * embDim + j) * 0.001)
+                        embParts.append(String(format: "%.6f", val))
+                    }
+                    let embedding = "[\(embParts.joined(separator: ","))]"
+                    rows.append("{id: \(i), path: 'image_\(i).jpg', embedding: \(embedding)}")
+                }
+                let query =
+                    "UNWIND [\(rows.joined(separator: ","))] AS row CREATE (:ImageNode {id: row.id, path: row.path, embedding: row.embedding});"
+                _ = try conn.query(query)
+
+                if batchEnd % 10_000 == 0 {
+                    // Explicit checkpoint every 10K to free buffer pool memory
+                    _ = try conn.query("CHECKPOINT;")
+                    let elapsed = Date().timeIntervalSince(insertStart)
+                    print("[100K Test] Inserted \(batchEnd)/\(totalNodes) nodes (\(String(format: "%.1f", elapsed))s) [checkpointed]")
+                }
+            }
+
+            let insertElapsed = Date().timeIntervalSince(insertStart)
+            print("[100K Test] ✅ All \(totalNodes) nodes inserted in \(String(format: "%.1f", insertElapsed))s (\(String(format: "%.0f", Double(totalNodes) / insertElapsed)) nodes/sec)")
+
+            // Verify count
+            let countResult = try conn.query("MATCH (n:ImageNode) RETURN COUNT(*);")
+            let countTuple = try countResult.getNext()!
+            let count = try countTuple.getValue(0) as! Int64
+            XCTAssertEqual(count, Int64(totalNodes), "Expected \(totalNodes) nodes, got \(count)")
+            print("[100K Test] Count verified: \(count) ✓")
+
+            // Verify a mid-range node
+            let midResult = try conn.query("MATCH (n:ImageNode {id: 50000}) RETURN n.path;")
+            let midTuple = try midResult.getNext()!
+            let midPath = try midTuple.getValue(0) as? String
+            XCTAssertEqual(midPath, "image_50000.jpg")
+            print("[100K Test] Node id=50000 path: \(midPath ?? "nil") ✓")
+
+            let sessionElapsed = Date().timeIntervalSince(sessionStart)
+            print("[100K Test] Session 1 complete in \(String(format: "%.1f", sessionElapsed))s")
+        }
+        // DB and Connection destroyed here
+
+        // ── Session 2: Reopen and verify ──
+        do {
+            print("[100K Test] Reopening DB...")
+            let reopenStart = Date()
+            let db = try Database(dbPath, config)
+            let conn = try Connection(db)
+            let reopenTime = Date().timeIntervalSince(reopenStart)
+            print("[100K Test] DB reopened in \(String(format: "%.1f", reopenTime))s")
+
+            // Verify count
+            let countResult = try conn.query("MATCH (n:ImageNode) RETURN COUNT(*);")
+            let countTuple = try countResult.getNext()!
+            let count = try countTuple.getValue(0) as! Int64
+            XCTAssertEqual(count, Int64(totalNodes), "Expected \(totalNodes) nodes after reopen, got \(count)")
+            print("[100K Test] Count after reopen: \(count) ✓")
+
+            // Verify first node
+            let firstResult = try conn.query("MATCH (n:ImageNode {id: 0}) RETURN n.path;")
+            let firstTuple = try firstResult.getNext()!
+            let firstPath = try firstTuple.getValue(0) as? String
+            XCTAssertEqual(firstPath, "image_0.jpg")
+            print("[100K Test] Node id=0 path: \(firstPath ?? "nil") ✓")
+
+            // Verify mid-range node
+            let midResult = try conn.query("MATCH (n:ImageNode {id: 50000}) RETURN n.path;")
+            let midTuple = try midResult.getNext()!
+            let midPath = try midTuple.getValue(0) as? String
+            XCTAssertEqual(midPath, "image_50000.jpg")
+            print("[100K Test] Node id=50000 path: \(midPath ?? "nil") ✓")
+
+            // Verify last node
+            let lastResult = try conn.query("MATCH (n:ImageNode {id: 99999}) RETURN n.path;")
+            let lastTuple = try lastResult.getNext()!
+            let lastPath = try lastTuple.getValue(0) as? String
+            XCTAssertEqual(lastPath, "image_99999.jpg")
+            print("[100K Test] Node id=99999 path: \(lastPath ?? "nil") ✓")
+
+            // DB size report
+            let fm = FileManager.default
+            if let enumerator = fm.enumerator(atPath: dbPath) {
+                var totalSize: UInt64 = 0
+                while let file = enumerator.nextObject() as? String {
+                    let fullPath = (dbPath as NSString).appendingPathComponent(file)
+                    if let attrs = try? fm.attributesOfItem(atPath: fullPath) {
+                        totalSize += attrs[.size] as? UInt64 ?? 0
+                    }
+                }
+                print("[100K Test] DB directory size: \(totalSize / 1024 / 1024) MB")
+            }
+
+            print("[100K Test] ✅ All data verified after reopen")
+        }
+
+        let totalElapsed = Date().timeIntervalSince(overallStart)
+        print("\n[100K Test] === SUMMARY ===")
+        print("[100K Test] Total time: \(String(format: "%.1f", totalElapsed))s")
+        print("[100K Test] Nodes: \(totalNodes)")
+        print("[100K Test] Embedding dims: \(embDim)")
+        print("[100K Test] Buffer pool: 256 MB")
+        print("[100K Test] ✅ Production scale test PASSED")
+    }
 }
 
