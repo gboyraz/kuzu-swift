@@ -47,6 +47,8 @@ public final class Database: @unchecked Sendable {
             if enablePressure {
                 setupMemoryPressureMonitoring()
             }
+            let adaptiveCheckpoint = systemConfig?.adaptiveCheckpoint ?? true
+            applyAdaptiveCheckpoint(adaptiveCheckpoint)
             return
         } else {
             throw KuzuError.databaseInitializationFailed(
@@ -108,6 +110,17 @@ public final class Database: @unchecked Sendable {
     }
 
     // MARK: - Private
+
+    private func applyAdaptiveCheckpoint(_ enabled: Bool) {
+        var conn = kuzu_connection()
+        let connState = kuzu_connection_init(&cDatabase, &conn)
+        guard connState == KuzuSuccess else { return }
+        defer { kuzu_connection_destroy(&conn) }
+        var result = kuzu_query_result()
+        let query = "CALL adaptive_checkpoint=\(enabled)"
+        kuzu_connection_query(&conn, query, &result)
+        kuzu_query_result_destroy(&result)
+    }
 
     private func setupMemoryPressureMonitoring() {
         #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)

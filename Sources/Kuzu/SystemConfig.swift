@@ -39,6 +39,12 @@ public final class SystemConfig: @unchecked Sendable {
     /// Default is `true`.
     public var enableMemoryPressureHandling: Bool = true
 
+    /// Whether to enable adaptive checkpointing in the database engine.
+    /// When enabled, Kuzu uses adaptive checkpoint intervals based on workload.
+    /// This is applied as a runtime configuration when the database opens.
+    /// Default is `true`.
+    public var adaptiveCheckpoint: Bool = true
+
     /// Creates a new system configuration with default values.
     ///
     /// The default system configuration is as follows:
@@ -84,7 +90,9 @@ public final class SystemConfig: @unchecked Sendable {
         readOnly: Bool = false,
         autoCheckpoint: Bool = true,
         checkpointThreshold: UInt64 = UInt64.max,
-        maxDBSize: UInt64 = 0
+        maxDBSize: UInt64 = 0,
+        adaptiveCheckpoint: Bool = true,
+        enableMemoryPressureHandling: Bool = true
     ) {
         self.init()
         if bufferPoolSize > 0 {
@@ -102,6 +110,8 @@ public final class SystemConfig: @unchecked Sendable {
         if maxDBSize > 0 {
             cSystemConfig.max_db_size = maxDBSize
         }
+        self.adaptiveCheckpoint = adaptiveCheckpoint
+        self.enableMemoryPressureHandling = enableMemoryPressureHandling
     }
 
     #if !os(Linux)
@@ -125,6 +135,8 @@ public final class SystemConfig: @unchecked Sendable {
             autoCheckpoint: Bool = true,
             checkpointThreshold: UInt64 = UInt64.max,
             maxDBSize: UInt64 = 0,
+            adaptiveCheckpoint: Bool = true,
+            enableMemoryPressureHandling: Bool = true,
             threadQoS: qos_class_t = QOS_CLASS_DEFAULT
         ) {
             self.init(
@@ -134,7 +146,9 @@ public final class SystemConfig: @unchecked Sendable {
                 readOnly: readOnly,
                 autoCheckpoint: autoCheckpoint,
                 checkpointThreshold: checkpointThreshold,
-                maxDBSize: maxDBSize
+                maxDBSize: maxDBSize,
+                adaptiveCheckpoint: adaptiveCheckpoint,
+                enableMemoryPressureHandling: enableMemoryPressureHandling
             )
             self.cSystemConfig.thread_qos = threadQoS.rawValue
         }
