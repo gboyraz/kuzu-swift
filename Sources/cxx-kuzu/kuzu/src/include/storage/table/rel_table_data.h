@@ -112,6 +112,22 @@ public:
 
     void markChunkedGroupsAsUnused() { nodeGroups->markChunkedGroupsAsUnused(); }
 
+    // Mark only the in-memory chunked groups of a specific CSR node group as unused/spillable.
+    // Used by streaming commit to release memory one node group at a time.
+    void markNodeGroupChunkedGroupsAsUnused(common::node_group_idx_t nodeGroupIdx) {
+        auto* nodeGroup = getNodeGroup(nodeGroupIdx);
+        if (!nodeGroup) {
+            return;
+        }
+        const auto numChunkedGroups = nodeGroup->getNumChunkedGroups();
+        for (common::node_group_idx_t i = 0; i < numChunkedGroups; i++) {
+            auto* chunkedGroup = nodeGroup->getChunkedNodeGroup(i);
+            if (chunkedGroup && chunkedGroup->getResidencyState() == ResidencyState::IN_MEMORY) {
+                chunkedGroup->setUnused(*mm);
+            }
+        }
+    }
+
     void rollbackGroupCollectionInsert(common::row_idx_t numRows_, bool isPersistent);
 
     common::RelDataDirection getDirection() const { return direction; }

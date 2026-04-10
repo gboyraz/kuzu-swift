@@ -417,16 +417,27 @@ void RelTable::commit(main::ClientContext* context, TableCatalogEntry* tableEntr
         auto columnID = tableEntry->getColumnID(property.getName());
         columnIDsToCommit.push_back(columnID);
     }
-    // commit rel table data
+    // Streaming CSR commit: process one nodeGroup at a time per direction.
+    // After finishing each nodeGroup, mark its in-memory chunked groups as spillable so the
+    // Spiller can evict them under memory pressure. This reduces peak memory from all groups'
+    // worth to ~1 group's worth.
     auto transaction = context->getTransaction();
     for (auto& relData : directedRelData) {
         const auto direction = relData->getDirection();
         const auto columnToSkip = (direction == RelDataDirection::FWD) ?
                                       LOCAL_BOUND_NODE_ID_COLUMN_ID :
                                       LOCAL_NBR_NODE_ID_COLUMN_ID;
-        for (auto& [boundNodeOffset, rowIndices] : localRelTable.getCSRIndex(direction)) {
+        auto& csrIndex = localRelTable.getCSRIndex(direction);
+        node_group_idx_t prevNodeGroupIdx = INVALID_NODE_GROUP_IDX;
+        for (auto& [boundNodeOffset, rowIndices] : csrIndex) {
             auto [nodeGroupIdx, boundOffsetInGroup] =
                 StorageUtils::getQuotientRemainder(boundNodeOffset, StorageConfig::NODE_GROUP_SIZE);
+            // When we move to a new nodeGroup, mark the previous one's chunks as spillable.
+            if (prevNodeGroupIdx != INVALID_NODE_GROUP_IDX &&
+                nodeGroupIdx != prevNodeGroupIdx) {
+                relData->markNodeGroupChunkedGroupsAsUnused(prevNodeGroupIdx);
+            }
+            prevNodeGroupIdx = nodeGroupIdx;
             auto& nodeGroup =
                 relData->getOrCreateNodeGroup(transaction, nodeGroupIdx)->cast<CSRNodeGroup>();
             pushInsertInfo(transaction, direction, nodeGroup, rowIndices.size(),
@@ -434,12 +445,10 @@ void RelTable::commit(main::ClientContext* context, TableCatalogEntry* tableEntr
             prepareCommitForNodeGroup(transaction, columnIDsToCommit, localNodeGroup, nodeGroup,
                 boundOffsetInGroup, rowIndices, columnToSkip);
         }
-    }
-
-    // Mark committed in-memory chunked groups as spillable so the Spiller can evict them
-    // reactively under memory pressure (via claimNextGroup in reserve()).
-    for (auto& relData : directedRelData) {
-        relData->markChunkedGroupsAsUnused();
+        // Mark the last nodeGroup's chunks as spillable.
+        if (prevNodeGroupIdx != INVALID_NODE_GROUP_IDX) {
+            relData->markNodeGroupChunkedGroupsAsUnused(prevNodeGroupIdx);
+        }
     }
 
     localRelTable.clear(*context->getMemoryManager());
