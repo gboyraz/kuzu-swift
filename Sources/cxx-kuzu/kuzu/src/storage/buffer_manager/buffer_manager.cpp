@@ -525,20 +525,48 @@ void BufferManager::resetSpiller(std::string spillPath) {
 }
 
 bool BufferManager::reserveForMemoryManager(uint64_t size) {
-    // Delegates to reserve() which handles eviction/spilling/backpressure.
-    // The headroom is enforced by reducing the effective budget: MM cannot consume
-    // more than (bufferPoolSize - headroom), ensuring BM always has space for
-    // page cache I/O operations and avoiding deadlock during eviction flushes.
+    // MM allocations are non-evictable: they must never trigger the Spiller.
+    // Triggering the Spiller from MM allocation can cause self-eviction — the Spiller
+    // frees MemoryBuffers (via claimNextGroup → spillToDisk) that may still be in use
+    // by the same operation, leading to use-after-free / SIGSEGV in getBuffer().
+    //
+    // Instead, we track MM usage in the unified budget and evict only BM pages
+    // (via evictPages) to make room. If eviction alone cannot free enough, we fail.
     const uint64_t headroom =
         std::max(bufferPoolSize.load() / 20, static_cast<uint64_t>(1024 * 1024));
 
-    // If MM usage already exceeds the effective budget, try to reclaim first.
-    if (memoryManagerUsage.load() + size + headroom > bufferPoolSize.load()) {
-        // Attempt eviction/spill through reserve; it may still succeed.
-    }
+    // Pre-reserve the memory in usedMemory (same pattern as reserve()).
+    usedMemory += size;
 
-    if (!reserve(size)) {
-        return false;
+    uint64_t totalClaimedMemory = 0;
+    uint8_t failedCount = 0;
+    const auto needMoreMemory = [&]() {
+        return size > totalClaimedMemory &&
+               usedMemory.load() + headroom > bufferPoolSize.load() + totalClaimedMemory;
+    };
+
+    // Evict BM pages only — never trigger Spiller from MM allocations.
+    while (needMoreMemory()) {
+        uint64_t memoryClaimed = evictPages();
+        if (memoryClaimed > 0) {
+            totalClaimedMemory += memoryClaimed;
+        } else {
+            if (failedCount++ < 10) {
+                auto waitMs = std::min(10 << failedCount, 500);
+                memoryFreed.store(false);
+                std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+            } else {
+                // Cannot free enough BM pages. Revert and fail.
+                if (totalClaimedMemory > 0) {
+                    freeUsedMemory(totalClaimedMemory);
+                }
+                usedMemory -= size;
+                return false;
+            }
+        }
+    }
+    if (totalClaimedMemory > 0) {
+        freeUsedMemory(totalClaimedMemory);
     }
     memoryManagerUsage += size;
     return true;

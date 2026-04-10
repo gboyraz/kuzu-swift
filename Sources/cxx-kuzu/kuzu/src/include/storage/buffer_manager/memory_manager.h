@@ -5,6 +5,7 @@
 #include <mutex>
 #include <stack>
 
+#include "common/assert.h"
 #include "common/system_config.h"
 #include "common/types/types.h"
 #include "storage/buffer_manager/spill_result.h"
@@ -34,7 +35,10 @@ public:
     KUZU_API ~MemoryBuffer();
     DELETE_COPY_AND_MOVE(MemoryBuffer);
 
-    std::span<uint8_t> getBuffer() const { return buffer; }
+    std::span<uint8_t> getBuffer() const {
+        KU_ASSERT(!evicted);
+        return buffer;
+    }
     uint8_t* getData() const { return getBuffer().data(); }
 
     MemoryManager* getMemoryManager() const { return mm; }
