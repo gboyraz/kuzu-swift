@@ -347,6 +347,13 @@ KUZU_C_API kuzu_state kuzu_database_init(const char* database_path,
  */
 KUZU_C_API void kuzu_database_destroy(kuzu_database* database);
 
+/**
+ * @brief Dynamically resizes the buffer pool of the database at runtime.
+ * @param database The database instance to resize.
+ * @param new_size The new buffer pool size in bytes.
+ */
+KUZU_C_API void kuzu_database_resize_buffer_pool(kuzu_database* database, uint64_t new_size);
+
 KUZU_C_API kuzu_system_config kuzu_default_system_config();
 
 // Connection

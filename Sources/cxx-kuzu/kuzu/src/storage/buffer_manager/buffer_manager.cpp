@@ -612,6 +612,23 @@ void BufferManager::freeForMemoryManager(uint64_t size) {
     memoryManagerUsage -= size;
 }
 
+void BufferManager::resizeBufferPool(uint64_t newSize) {
+    auto oldSize = bufferPoolSize.load();
+    if (newSize == oldSize) {
+        return;
+    }
+    bufferPoolSize.store(newSize);
+    if (newSize < oldSize) {
+        // Trigger eviction sweeps until used memory is within the new limit
+        while (usedMemory.load() > newSize) {
+            auto freed = evictPages();
+            if (freed == 0) {
+                break; // Can't evict any more pages
+            }
+        }
+    }
+}
+
 BufferManager::~BufferManager() = default;
 
 } // namespace storage

@@ -235,5 +235,9 @@ uint64_t Database::getNextQueryID() {
     return queryIDGenerator.queryID++;
 }
 
+void Database::resizeBufferPool(uint64_t newSize) {
+    bufferManager->resizeBufferPool(newSize);
+}
+
 } // namespace main
 } // namespace kuzu

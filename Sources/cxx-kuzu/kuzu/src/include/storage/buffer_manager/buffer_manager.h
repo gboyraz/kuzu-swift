@@ -253,6 +253,10 @@ public:
 
     void resetSpiller(std::string spillPath);
 
+    // Dynamically resize the buffer pool. If shrinking, triggers eviction to free pages
+    // above the new limit. If growing, simply raises the limit.
+    void resizeBufferPool(uint64_t newSize);
+
     // This function only works when run in a single-threaded context
     // Iterates through the eviction queue and removes any elements that have already been evicted
     // (due to some external intervention)

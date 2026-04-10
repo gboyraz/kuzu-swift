@@ -154,6 +154,9 @@ public:
 
     uint64_t getNextQueryID();
 
+    // Dynamically resize the buffer pool at runtime.
+    KUZU_API void resizeBufferPool(uint64_t newSize);
+
 private:
     using construct_bm_func_t =
         std::function<std::unique_ptr<storage::BufferManager>(const Database&)>;

@@ -23,6 +23,13 @@ kuzu_state kuzu_database_init(const char* database_path, kuzu_system_config conf
     return KuzuSuccess;
 }
 
+void kuzu_database_resize_buffer_pool(kuzu_database* database, uint64_t new_size) {
+    if (database == nullptr || database->_database == nullptr) {
+        return;
+    }
+    static_cast<Database*>(database->_database)->resizeBufferPool(new_size);
+}
+
 void kuzu_database_destroy(kuzu_database* database) {
     if (database == nullptr) {
         return;

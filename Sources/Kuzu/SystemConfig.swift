@@ -8,6 +8,18 @@
 import Foundation
 @_implementationOnly import cxx_kuzu
 
+/// Represents the level of memory pressure reported by the system.
+public enum MemoryPressureLevel: Sendable {
+    /// No memory pressure — buffer pool at full (original) size.
+    case normal
+    /// Moderate pressure — buffer pool reduced to 75% of original.
+    case warning
+    /// Significant pressure — buffer pool reduced to 50% of original.
+    case critical
+    /// Severe pressure — buffer pool reduced to 25% of original.
+    case emergency
+}
+
 /// Represents the configuration of Kuzu database system.
 ///
 /// The configuration includes settings for buffer pool size, thread management,
@@ -20,6 +32,12 @@ import Foundation
 /// - **watchOS**: buffer pool 128MB
 public final class SystemConfig: @unchecked Sendable {
     internal var cSystemConfig: kuzu_system_config
+
+    /// Whether to automatically handle OS memory pressure events by resizing the buffer pool.
+    /// When enabled, the database monitors system memory pressure and dynamically shrinks
+    /// the buffer pool under pressure, restoring it when pressure eases.
+    /// Default is `true`.
+    public var enableMemoryPressureHandling: Bool = true
 
     /// Creates a new system configuration with default values.
     ///
