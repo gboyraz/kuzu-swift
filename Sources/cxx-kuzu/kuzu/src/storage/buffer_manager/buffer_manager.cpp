@@ -254,6 +254,7 @@ void BufferManager::optimisticRead(FileHandle& fileHandle, page_idx_t pageIdx,
 void BufferManager::unpin(FileHandle& fileHandle, page_idx_t pageIdx) {
     auto pageState = fileHandle.getPageState(pageIdx);
     pageState->unlock();
+    memoryAvailableCV.notify_one();
 }
 
 // evicts up to 64 pages and returns the space reclaimed
@@ -379,15 +380,25 @@ bool BufferManager::reserve(uint64_t sizeToReserve) {
         }
         if (memoryClaimed == 0 && needMoreMemory()) {
             if (failedCount++ < 10) {
-                // Exponential backoff: 10, 20, 40, 80, 160, 320, 500, 500, 500, 500 ms
+                // Exponential backoff with condition variable wait
                 auto waitMs = std::min(10 << failedCount, 500);
-                std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+                std::unique_lock<std::mutex> lock(memoryMutex);
+                memoryAvailableCV.wait_for(lock, std::chrono::milliseconds(waitMs));
             } else {
-                // Cannot find more pages to be evicted. Free the memory we reserved and return
-                // false.
-                freeUsedMemory(sizeToReserve + totalClaimedMemory);
-                nonEvictableMemory -= nonEvictableClaimedMemory;
-                return false;
+                // Final attempt: wait up to 5 seconds for memory to become available
+                std::unique_lock<std::mutex> lock(memoryMutex);
+                if (memoryAvailableCV.wait_for(lock, std::chrono::seconds(5),
+                        [this, sizeToReserve, &totalClaimedMemory]() {
+                            return usedMemory.load() + sizeToReserve - totalClaimedMemory <= bufferPoolSize.load();
+                        })) {
+                    // Memory became available, reset retry counter and try again
+                    failedCount = 0;
+                } else {
+                    // Truly exhausted after waiting 5 seconds
+                    freeUsedMemory(sizeToReserve + totalClaimedMemory);
+                    nonEvictableMemory -= nonEvictableClaimedMemory;
+                    return false;
+                }
             }
         }
         totalClaimedMemory += memoryClaimed;
@@ -498,7 +509,9 @@ void BufferManager::removePageFromFrame(FileHandle& fileHandle, page_idx_t pageI
 
 uint64_t BufferManager::freeUsedMemory(uint64_t size) {
     KU_ASSERT(usedMemory.load() >= size);
-    return usedMemory.fetch_sub(size);
+    auto prev = usedMemory.fetch_sub(size);
+    memoryAvailableCV.notify_all();
+    return prev;
 }
 
 void BufferManager::resetSpiller(std::string spillPath) {

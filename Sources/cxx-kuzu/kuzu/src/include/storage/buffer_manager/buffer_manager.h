@@ -1,9 +1,11 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "common/types/types.h"
@@ -292,6 +294,8 @@ private:
     std::vector<std::unique_ptr<FileHandle>> fileHandles;
     std::unique_ptr<Spiller> spiller;
     common::VirtualFileSystem* vfs;
+    std::mutex memoryMutex;
+    std::condition_variable memoryAvailableCV;
 };
 
 } // namespace storage
