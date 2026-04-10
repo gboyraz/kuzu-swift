@@ -1032,5 +1032,92 @@ final class StressTests: XCTestCase {
         print("[StressTest] 3 sessions completed successfully ✓")
         print("[StressTest] Spiller mechanism validated — data > buffer pool survived ✓")
     }
+
+    // MARK: - Buffer Pool Scale Baseline
+
+    func testBufferPoolScaleBaseline() throws {
+        let sizes: [(name: String, size: UInt64)] = [
+            ("64MB", 64 * 1024 * 1024),
+            ("32MB", 32 * 1024 * 1024),
+        ]
+
+        for (sizeName, bufferPoolSize) in sizes {
+            let tempDir = NSTemporaryDirectory() + "kuzu_scale_\(sizeName)_\(UUID().uuidString)"
+            try FileManager.default.createDirectory(
+                atPath: tempDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(atPath: tempDir) }
+
+            print("[ScaleTest] Testing with \(sizeName) buffer pool")
+
+            let steps = [1000, 5000, 10_000, 20_000, 50_000]
+            var maxSuccessful = 0
+
+            for nodeCount in steps {
+                do {
+                    let stepDir = tempDir + "/step_\(nodeCount)"
+                    try FileManager.default.createDirectory(
+                        atPath: stepDir, withIntermediateDirectories: true)
+                    let dbPath = stepDir + "/db"
+
+                    let config = SystemConfig(
+                        bufferPoolSize: bufferPoolSize,
+                        maxNumThreads: 2,
+                        autoCheckpoint: true,
+                        checkpointThreshold: 8 * 1024 * 1024  // 8MB
+                    )
+
+                    let db = try Database(dbPath, config)
+                    let conn = try Connection(db)
+
+                    // Create schema
+                    _ = try conn.query(
+                        "CREATE NODE TABLE ScaleNode(id INT64, data STRING, embedding DOUBLE[128], PRIMARY KEY(id));"
+                    )
+
+                    // Insert in batches of 500
+                    let start = Date()
+                    let batchSize = 500
+                    for batchStart in stride(from: 0, to: nodeCount, by: batchSize) {
+                        let batchEnd = min(batchStart + batchSize, nodeCount)
+                        var rows = [String]()
+                        for i in batchStart..<batchEnd {
+                            var embParts = [String]()
+                            embParts.reserveCapacity(128)
+                            for j in 0..<128 {
+                                let val = sin(Double(i * 128 + j) * 0.001)
+                                embParts.append(String(format: "%.6f", val))
+                            }
+                            let embedding = "[\(embParts.joined(separator: ","))]"
+                            rows.append(
+                                "{id: \(i), data: 'node_\(i)', embedding: \(embedding)}")
+                        }
+                        let query =
+                            "UNWIND [\(rows.joined(separator: ","))] AS row CREATE (:ScaleNode {id: row.id, data: row.data, embedding: row.embedding});"
+                        _ = try conn.query(query)
+                    }
+
+                    // Verify count
+                    let countResult = try conn.query(
+                        "MATCH (n:ScaleNode) RETURN count(n) AS c;")
+                    let countTuple = try countResult.getNext()!
+                    let count = try countTuple.getValue(0) as! Int64
+
+                    let elapsed = Date().timeIntervalSince(start)
+                    maxSuccessful = nodeCount
+                    print(
+                        "[ScaleTest] \(sizeName): ✅ \(nodeCount) nodes inserted (\(count) verified) in \(String(format: "%.1f", elapsed))s"
+                    )
+
+                } catch {
+                    print(
+                        "[ScaleTest] \(sizeName): ❌ CRASHED at \(nodeCount) nodes: \(error)"
+                    )
+                    break  // Don't try larger sizes
+                }
+            }
+
+            print("[ScaleTest] \(sizeName): Max successful = \(maxSuccessful) nodes")
+        }
+    }
 }
 
