@@ -437,13 +437,10 @@ void RelTable::commit(main::ClientContext* context, TableCatalogEntry* tableEntr
     }
 
     // Mark committed in-memory chunked groups as spillable so the Spiller can evict them
-    // to disk under memory pressure.
+    // reactively under memory pressure (via claimNextGroup in reserve()).
     for (auto& relData : directedRelData) {
         relData->markChunkedGroupsAsUnused();
     }
-    // Proactively spill unused groups to disk to reclaim memory before buffer pool pressure builds.
-    memoryManager->getBufferManager()->getSpillerOrSkip(
-        [](auto& spiller) { spiller.spillUnusedGroups(); });
 
     localRelTable.clear(*context->getMemoryManager());
 }

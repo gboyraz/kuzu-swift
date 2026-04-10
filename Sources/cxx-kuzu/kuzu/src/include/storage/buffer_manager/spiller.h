@@ -27,9 +27,6 @@ public:
     SpillResult claimNextGroup();
     // Must only be used once all chunks have been loaded from disk.
     void clearFile();
-    // Proactively spill all currently tracked unused groups to disk.
-    // Returns the total SpillResult across all spilled groups.
-    SpillResult spillUnusedGroups();
     uint64_t getTotalBytesSpilled() const { return totalBytesSpilled.load(); }
     ~Spiller();
 

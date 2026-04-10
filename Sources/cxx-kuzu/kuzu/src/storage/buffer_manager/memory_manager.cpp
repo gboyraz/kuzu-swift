@@ -73,26 +73,12 @@ std::span<uint8_t> MemoryManager::mallocBuffer(bool initializeToZero, uint64_t s
 }
 
 std::unique_ptr<MemoryBuffer> MemoryManager::allocateBuffer(bool initializeToZero, uint64_t size) {
-    if (size != TEMP_PAGE_SIZE) [[unlikely]] {
-        auto buffer = mallocBuffer(initializeToZero, size);
-        return std::make_unique<MemoryBuffer>(this, INVALID_PAGE_IDX, buffer.data(), size);
-    }
-    page_idx_t pageIdx = INVALID_PAGE_IDX;
-    {
-        std::scoped_lock<std::mutex> lock(allocatorLock);
-        if (freePages.empty()) {
-            pageIdx = fh->addNewPage();
-        } else {
-            pageIdx = freePages.top();
-            freePages.pop();
-        }
-    }
-    auto buffer = bm->pin(*fh, pageIdx, PageReadPolicy::DONT_READ_PAGE);
-    auto memoryBuffer = std::make_unique<MemoryBuffer>(this, pageIdx, buffer);
-    if (initializeToZero) {
-        memset(memoryBuffer->getBuffer().data(), 0, pageSize);
-    }
-    return memoryBuffer;
+    // All MM allocations use mallocBuffer() which goes through reserveForMemoryManager().
+    // This ensures the Spiller is never triggered from MM allocations — MemoryBuffers must
+    // never be evicted/spilled. The previous TEMP_PAGE_SIZE path used pin() → reserve()
+    // which could trigger spiller->claimNextGroup(), bypassing this protection.
+    auto buffer = mallocBuffer(initializeToZero, size);
+    return std::make_unique<MemoryBuffer>(this, INVALID_PAGE_IDX, buffer.data(), size);
 }
 
 void MemoryManager::freeBlock(page_idx_t pageIdx, std::span<uint8_t> buffer) {

@@ -595,11 +595,8 @@ void NodeTable::commit(main::ClientContext* context, TableCatalogEntry* tableEnt
     // leading to an inconsistent result with connected rels.
     nodeGroups->append(transaction, columnIDsToCommit, localNodeTable.getNodeGroups());
     // Mark committed in-memory chunked groups as spillable so the Spiller can evict them
-    // to disk under memory pressure.
+    // reactively under memory pressure (via claimNextGroup in reserve()).
     nodeGroups->markChunkedGroupsAsUnused();
-    // Proactively spill unused groups to disk to reclaim memory before buffer pool pressure builds.
-    memoryManager->getBufferManager()->getSpillerOrSkip(
-        [](auto& spiller) { spiller.spillUnusedGroups(); });
     // 2. Set deleted flag for tuples that are deleted in local storage.
     row_idx_t numLocalRows = 0u;
     for (auto localNodeGroupIdx = 0u; localNodeGroupIdx < localNodeTable.getNumNodeGroups();
