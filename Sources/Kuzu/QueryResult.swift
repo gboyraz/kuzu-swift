@@ -17,6 +17,10 @@ public final class QueryResult: CustomStringConvertible, Sequence, @unchecked
     internal var cQueryResult: kuzu_query_result
     internal var connection: Connection
     internal var columnNames: [String]?
+    /// Tracks whether the underlying C query result has already been destroyed.
+    /// This prevents double-free when a PreparedStatement is re-executed and the
+    /// previous QueryResult's C memory is invalidated before ARC calls deinit.
+    internal private(set) var isDestroyed = false
 
     /// An iterator type for QueryResult that conforms to IteratorProtocol.
     public struct Iterator: IteratorProtocol {
@@ -49,8 +53,19 @@ public final class QueryResult: CustomStringConvertible, Sequence, @unchecked
         self.connection = connection
     }
 
-    deinit {
+    /// Explicitly destroys the underlying C query result and marks this object as destroyed.
+    /// After calling this, the QueryResult should not be used for any further operations.
+    internal func invalidate() {
+        guard !isDestroyed else { return }
         kuzu_query_result_destroy(&cQueryResult)
+        cQueryResult._query_result = nil
+        isDestroyed = true
+    }
+
+    deinit {
+        if !isDestroyed {
+            kuzu_query_result_destroy(&cQueryResult)
+        }
     }
 
     /// Returns the string representation of the QueryResult.

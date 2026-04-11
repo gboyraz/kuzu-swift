@@ -157,4 +157,41 @@ final class ConnectionTests: XCTestCase {
             XCTFail("Unexpected error type")
         }
     }
+
+    /// Regression test for GitHub issue #25: PreparedStatement reuse causes double-free.
+    /// When a PreparedStatement is executed multiple times, the resulting QueryResult
+    /// objects must not share internal C++ memory. Previously, ARC-deferred deallocation
+    /// of old QueryResult objects would free memory that a new execution had already
+    /// invalidated, causing a malloc double-free crash.
+    func testPreparedStatementReuseNoDoubleFree() throws {
+        let conn = try Connection(db)
+
+        // Create a table to delete from
+        _ = try conn.query(
+            "CREATE NODE TABLE TestItem (id STRING, PRIMARY KEY (id));"
+        )
+        _ = try conn.query("CREATE (t:TestItem {id: 'item1'});")
+        _ = try conn.query("CREATE (t:TestItem {id: 'item2'});")
+        _ = try conn.query("CREATE (t:TestItem {id: 'item3'});")
+
+        // Prepare once, execute multiple times — this previously crashed
+        let stmt = try conn.prepare(
+            "MATCH (t:TestItem {id: $id}) DELETE t"
+        )
+
+        for itemId in ["item1", "item2", "item3"] {
+            NSLog("Executing DELETE for %@", itemId)
+            _ = try conn.execute(stmt, ["id": itemId] as [String: Any?])
+        }
+
+        // Verify all items were deleted
+        let result = try conn.query(
+            "MATCH (t:TestItem) RETURN COUNT(t);"
+        )
+        XCTAssertTrue(result.hasNext())
+        let tuple = try result.getNext()!
+        let count = try tuple.getValue(0) as! Int64
+        XCTAssertEqual(count, 0, "All TestItem nodes should be deleted")
+        NSLog("testPreparedStatementReuseNoDoubleFree passed — no crash")
+    }
 }

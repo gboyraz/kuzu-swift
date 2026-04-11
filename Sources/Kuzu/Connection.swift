@@ -95,6 +95,12 @@ public final class Connection: @unchecked Sendable {
         _ preparedStatement: PreparedStatement,
         _ parameters: [String: T?]
     ) throws -> QueryResult {
+        // Invalidate the previous QueryResult from this PreparedStatement to prevent
+        // double-free. The C++ QueryResult may share internal state with the
+        // PreparedStatement; re-executing without destroying the old result first
+        // can cause the old result's deinit to free already-freed memory.
+        preparedStatement.activeQueryResult?.invalidate()
+
         var cQueryResult = kuzu_query_result()
         for (key, value) in parameters {
             let cValue = try swiftValueToKuzuValue(value)
@@ -134,6 +140,7 @@ public final class Connection: @unchecked Sendable {
             }
         }
         let queryResult = QueryResult(self, cQueryResult)
+        preparedStatement.activeQueryResult = queryResult
         return queryResult
     }
 
