@@ -480,11 +480,75 @@ std::unique_ptr<Index> OnDiskHNSWIndex::load(main::ClientContext* context, Stora
         auxInfo.config.copy());
 }
 
+// ---------------------------------------------------------------------------
+// HNSW Delete / Update state structs
+// ---------------------------------------------------------------------------
+struct HNSWDeleteState final : storage::Index::DeleteState {
+    ~HNSWDeleteState() override = default;
+};
+
+struct HNSWUpdateState final : storage::Index::UpdateState {
+    ~HNSWUpdateState() override = default;
+};
+
+// ---------------------------------------------------------------------------
+// OnDiskHNSWIndex — delete / update implementation
+// ---------------------------------------------------------------------------
+std::unique_ptr<Index::DeleteState> OnDiskHNSWIndex::initDeleteState(
+    const Transaction* /*transaction*/, MemoryManager* /*mm*/, visible_func /*isVisible*/) {
+    return std::make_unique<HNSWDeleteState>();
+}
+
+void OnDiskHNSWIndex::delete_(Transaction* /*transaction*/,
+    const common::ValueVector& nodeIDVector, DeleteState& /*deleteState*/) {
+    std::lock_guard<std::mutex> lock(deletedMtx);
+    for (auto i = 0u; i < nodeIDVector.state->getSelSize(); i++) {
+        auto pos = nodeIDVector.state->getSelVector()[i];
+        auto nodeOffset = nodeIDVector.getValue<common::internalID_t>(pos).offset;
+        deletedOffsets.insert(nodeOffset);
+    }
+}
+
+std::unique_ptr<Index::UpdateState> OnDiskHNSWIndex::initUpdateState(
+    main::ClientContext* /*context*/, common::column_id_t /*columnID*/,
+    visible_func /*isVisible*/) {
+    return std::make_unique<HNSWUpdateState>();
+}
+
+void OnDiskHNSWIndex::update(Transaction* /*transaction*/,
+    const common::ValueVector& nodeIDVector, common::ValueVector& /*propertyVector*/,
+    UpdateState& /*updateState*/) {
+    // Mark offset as updated so stale HNSW graph entries are filtered during search,
+    // and a brute-force scan using fresh storage data is performed instead.
+    std::lock_guard<std::mutex> lock(deletedMtx);
+    for (auto i = 0u; i < nodeIDVector.state->getSelSize(); i++) {
+        auto pos = nodeIDVector.state->getSelVector()[i];
+        auto nodeOffset = nodeIDVector.getValue<common::internalID_t>(pos).offset;
+        updatedOffsets.insert(nodeOffset);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OnDiskHNSWIndex — search with deleted-offset filtering
+// ---------------------------------------------------------------------------
 std::vector<NodeWithDistance> OnDiskHNSWIndex::search(Transaction* transaction,
     const EmbeddingHandle& queryVector, HNSWSearchState& searchState) const {
     auto result = searchFromCheckpointed(transaction, queryVector, searchState);
+    // Filter stale HNSW graph entries BEFORE brute-force scan so the brute-force
+    // results (which use fresh data) are not removed.
+    {
+        std::lock_guard<std::mutex> lock(deletedMtx);
+        if (!deletedOffsets.empty() || !updatedOffsets.empty()) {
+            std::erase_if(result, [&](const NodeWithDistance& n) {
+                return deletedOffsets.count(n.nodeOffset) > 0 ||
+                       updatedOffsets.count(n.nodeOffset) > 0;
+            });
+        }
+    }
     searchFromUnCheckpointed(transaction, queryVector, searchState, result);
-    result.resize(searchState.k);
+    if (result.size() > searchState.k) {
+        result.resize(searchState.k);
+    }
     return result;
 }
 
@@ -508,17 +572,43 @@ void OnDiskHNSWIndex::searchFromUnCheckpointed(Transaction* transaction,
     const auto numTotalRows = nodeTable.getNumTotalRows(transaction);
     const auto& hnswStorageInfo = storageInfo->cast<HNSWStorageInfo>();
     const auto numUnCheckpointedTuples = numTotalRows - hnswStorageInfo.numCheckpointedNodes;
-    if (numUnCheckpointedTuples == 0) {
-        // If the index is fully checkpointed, we can skip brute force search.
+
+    // Snapshot the updated offsets so we can brute-force scan them with fresh data.
+    std::unordered_set<common::offset_t> localUpdatedOffsets;
+    {
+        std::lock_guard<std::mutex> lock(deletedMtx);
+        localUpdatedOffsets = updatedOffsets;
+    }
+
+    if (numUnCheckpointedTuples == 0 && localUpdatedOffsets.empty()) {
         return;
     }
-    result.reserve(numUnCheckpointedTuples + result.size());
-    // TODO(Guodong): Perhaps should switch to scan instead of lookup here.
+    result.reserve(numUnCheckpointedTuples + localUpdatedOffsets.size() + result.size());
+
+    // Brute-force scan uncheckpointed offsets.
     for (auto offset = hnswStorageInfo.numCheckpointedNodes; offset < numTotalRows; offset++) {
+        {
+            std::lock_guard<std::mutex> lock(deletedMtx);
+            if (deletedOffsets.count(offset) > 0) {
+                continue;
+            }
+        }
         const auto vector =
             searchState.embeddings->getEmbedding(offset, searchState.embeddingScanState);
         if (vector.isNull()) {
-            continue; // Skip null or deleted values.
+            continue;
+        }
+        auto dist = metricFunc(queryVector.getPtr(), vector.getPtr(),
+            searchState.embeddings->getDimension());
+        result.emplace_back(offset, dist);
+    }
+
+    // Brute-force scan updated offsets (checkpointed nodes with stale HNSW entries).
+    for (const auto offset : localUpdatedOffsets) {
+        const auto vector =
+            searchState.embeddings->getEmbedding(offset, searchState.embeddingScanState);
+        if (vector.isNull()) {
+            continue;
         }
         auto dist = metricFunc(queryVector.getPtr(), vector.getPtr(),
             searchState.embeddings->getDimension());
@@ -605,7 +695,16 @@ void OnDiskHNSWIndex::commitInsert(Transaction* transaction,
 void OnDiskHNSWIndex::finalize(main::ClientContext* context) {
     auto& hnswStorageInfo = storageInfo->cast<HNSWStorageInfo>();
     const auto numTotalRows = nodeTable.getNumTotalRows(&DUMMY_CHECKPOINT_TRANSACTION);
-    if (numTotalRows == hnswStorageInfo.numCheckpointedNodes) {
+    // Capture and clear deleted/updated offsets — after rebuild, they are resolved.
+    std::unordered_set<common::offset_t> localDeletedOffsets;
+    std::unordered_set<common::offset_t> localUpdatedOffsets;
+    {
+        std::lock_guard<std::mutex> lock(deletedMtx);
+        localDeletedOffsets.swap(deletedOffsets);
+        localUpdatedOffsets.swap(updatedOffsets);
+    }
+    if (numTotalRows == hnswStorageInfo.numCheckpointedNodes && localDeletedOffsets.empty() &&
+        localUpdatedOffsets.empty()) {
         return;
     }
     auto [nodeTableEntry, upperRelTableEntry, lowerRelTableEntry] =
@@ -617,6 +716,10 @@ void OnDiskHNSWIndex::finalize(main::ClientContext* context) {
         upperRelTableEntry, lowerRelTableEntry, nodeTable, indexInfo.columnIDs[0], config.ml);
     // TODO(Guodong): Perhaps should switch to scan instead of lookup here.
     for (auto offset = hnswStorageInfo.numCheckpointedNodes; offset < numTotalRows; offset++) {
+        // Skip offsets that were deleted — they should not be part of the rebuilt graph.
+        if (localDeletedOffsets.count(offset) > 0) {
+            continue;
+        }
         const auto vector = insertState->searchState.embeddings->getEmbedding(offset, *scanState);
         if (vector.isNull()) {
             continue;

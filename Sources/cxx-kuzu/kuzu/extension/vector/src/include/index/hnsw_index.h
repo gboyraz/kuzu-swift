@@ -1,6 +1,8 @@
 #pragma once
 
+#include <mutex>
 #include <queue>
+#include <unordered_set>
 
 #include "common/random_engine.h"
 #include "graph/on_disk_graph.h"
@@ -114,7 +116,7 @@ public:
     void update(transaction::Transaction* /*transaction*/,
         const common::ValueVector& /*nodeIDVector*/, common::ValueVector& /*propertyVector*/,
         UpdateState& /*updateState*/) override {
-        // HNSW index is rebuilt from scratch on checkpoint, individual updates are no-ops.
+        // Default no-op for InMemHNSWIndex. OnDiskHNSWIndex overrides with real implementation.
     }
 
     std::unique_ptr<DeleteState> initDeleteState(const transaction::Transaction* /*transaction*/,
@@ -123,7 +125,7 @@ public:
     }
     void delete_(transaction::Transaction* /*transaction*/,
         const common::ValueVector& /*nodeIDVector*/, DeleteState& /*deleteState*/) override {
-        // DO NOTHING.
+        // Default no-op for InMemHNSWIndex. OnDiskHNSWIndex overrides with real implementation.
     }
 
     static int64_t getDegreeThresholdToShrink(int64_t degree);
@@ -328,6 +330,17 @@ public:
         return HNSW_INDEX_TYPE;
     }
 
+    std::unique_ptr<DeleteState> initDeleteState(const transaction::Transaction* transaction,
+        storage::MemoryManager* mm, storage::visible_func isVisible) override;
+    void delete_(transaction::Transaction* transaction,
+        const common::ValueVector& nodeIDVector, DeleteState& deleteState) override;
+
+    std::unique_ptr<UpdateState> initUpdateState(main::ClientContext* context,
+        common::column_id_t columnID, storage::visible_func isVisible) override;
+    void update(transaction::Transaction* transaction,
+        const common::ValueVector& nodeIDVector, common::ValueVector& propertyVector,
+        UpdateState& updateState) override;
+
     void finalize(main::ClientContext*) override;
     void checkpoint(main::ClientContext* context, storage::PageAllocator& pageAllocator) override;
 
@@ -400,6 +413,13 @@ private:
     storage::NodeTable& nodeTable;
     storage::RelTable* upperRelTable;
     storage::RelTable* lowerRelTable;
+
+    // Deleted offsets tracking — transient, cleared after finalize/checkpoint rebuild.
+    std::unordered_set<common::offset_t> deletedOffsets;
+    // Updated offsets — nodes whose embedding changed; stale HNSW graph entries are filtered,
+    // and a brute-force scan using fresh storage data is performed during search.
+    std::unordered_set<common::offset_t> updatedOffsets;
+    mutable std::mutex deletedMtx;
 };
 
 } // namespace vector_extension

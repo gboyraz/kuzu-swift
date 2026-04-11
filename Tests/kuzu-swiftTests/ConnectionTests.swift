@@ -2171,9 +2171,100 @@ final class ConnectionTests: XCTestCase {
         let result = try conn.query("MATCH (i:Image {id: 'img1'}) RETURN i.id")
         XCTAssertTrue(result.hasNext())
 
-        // ON MATCH SET on the embedding column — should also work (no-op for HNSW)
+        // ON MATCH SET on the embedding column — should also work
         _ = try conn.query(
             "MERGE (i:Image {id: 'img1'}) ON MATCH SET i.embedding = [0.5, 0.6, 0.7, 0.8]"
         )
+    }
+
+    // MARK: - HNSW Delete/Update Filtering Tests
+
+    func testHNSWDeleteFiltering() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        // Create table with 3-dim embedding
+        _ = try conn.query(
+            "CREATE NODE TABLE Vec(id INT64, embedding FLOAT[3], PRIMARY KEY(id))"
+        )
+
+        // Insert 5 nodes with distinct vectors
+        _ = try conn.query("CREATE (:Vec {id: 1, embedding: [1.0, 0.0, 0.0]})")
+        _ = try conn.query("CREATE (:Vec {id: 2, embedding: [0.0, 1.0, 0.0]})")
+        _ = try conn.query("CREATE (:Vec {id: 3, embedding: [0.0, 0.0, 1.0]})")
+        _ = try conn.query("CREATE (:Vec {id: 4, embedding: [0.5, 0.5, 0.0]})")
+        _ = try conn.query("CREATE (:Vec {id: 5, embedding: [0.0, 0.5, 0.5]})")
+
+        // Create HNSW index
+        try conn.createVectorIndex(table: "Vec", indexName: "vec_idx", property: "embedding", metric: "l2")
+
+        // Delete node with id=3
+        _ = try conn.query("MATCH (v:Vec {id: 3}) DELETE v")
+
+        // Search for k=5 nearest to [0,0,1] — deleted node (id=3) should NOT appear
+        let results = try conn.searchNearest(
+            table: "Vec", indexName: "vec_idx", queryVector: [0.0, 0.0, 1.0], k: 5
+        )
+
+        // Should get 4 results (not 5, since one was deleted)
+        XCTAssertEqual(results.count, 4, "Expected 4 results after deleting 1 of 5 nodes")
+
+        // The deleted node had offset 2 (0-indexed: id=1→offset 0, id=2→offset 1, ..., id=3→offset 2)
+        // Verify no result has the deleted node's offset
+        let resultOffsets = results.map { $0.nodeID.offset }
+        // Verify that we get 4 distinct offsets (the deleted offset should be missing)
+        XCTAssertEqual(Set(resultOffsets).count, 4, "Should have 4 distinct offsets")
+    }
+
+    func testHNSWUpdateFiltering() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        // Create table with 3-dim embedding
+        _ = try conn.query(
+            "CREATE NODE TABLE Vec2(id INT64, embedding FLOAT[3], PRIMARY KEY(id))"
+        )
+
+        // Insert 3 nodes: A=[1,0,0], B=[0,1,0], C=[0,0,1]
+        _ = try conn.query("CREATE (:Vec2 {id: 1, embedding: [1.0, 0.0, 0.0]})")
+        _ = try conn.query("CREATE (:Vec2 {id: 2, embedding: [0.0, 1.0, 0.0]})")
+        _ = try conn.query("CREATE (:Vec2 {id: 3, embedding: [0.0, 0.0, 1.0]})")
+
+        // Create HNSW index
+        try conn.createVectorIndex(table: "Vec2", indexName: "vec2_idx", property: "embedding", metric: "l2")
+
+        // Update B's vector to [0.9, 0.0, 0.0] (close to A)
+        _ = try conn.query("MATCH (v:Vec2 {id: 2}) SET v.embedding = [0.9, 0.0, 0.0]")
+
+        // Search nearest to [1.0, 0.0, 0.0] with k=3
+        let results = try conn.searchNearest(
+            table: "Vec2", indexName: "vec2_idx", queryVector: [1.0, 0.0, 0.0], k: 3
+        )
+
+        XCTAssertEqual(results.count, 3, "Should still return 3 results after update")
+
+        // Results sorted by distance:
+        // id=1 (offset 0) at [1,0,0] → L2 distance 0.0 from query [1,0,0]
+        // id=2 (offset 1) updated to [0.9,0,0] → L2 distance ~0.1 from query
+        // id=3 (offset 2) at [0,0,1] → L2 distance ~1.41 from query
+        XCTAssertTrue(results[0].distance < 0.01, "First result should be exact match")
+        XCTAssertTrue(results[1].distance < 0.5, "Second result should be close (updated B)")
+        XCTAssertTrue(results[2].distance > 1.0, "Third result should be far (C=[0,0,1])")
     }
 }
