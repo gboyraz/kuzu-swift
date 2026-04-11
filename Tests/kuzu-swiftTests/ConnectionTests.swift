@@ -939,4 +939,74 @@ final class ConnectionTests: XCTestCase {
         try conn.dropHashIndex(table: "T3", property: "name")
         try conn.dropHashIndex(table: "T3", property: "email")
     }
+
+    // MARK: - HNSW Vector Index Tests
+
+    func testVectorIndexCreateAndSearch() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        // Create table with 4-dim embedding (small for test)
+        _ = try conn.query(
+            "CREATE NODE TABLE Item(id INT64, name STRING, embedding FLOAT[4], PRIMARY KEY(id))"
+        )
+
+        // Insert nodes with embeddings
+        _ = try conn.query("CREATE (:Item {id: 1, name: 'apple', embedding: [1.0, 0.0, 0.0, 0.0]})")
+        _ = try conn.query("CREATE (:Item {id: 2, name: 'banana', embedding: [0.9, 0.1, 0.0, 0.0]})")
+        _ = try conn.query("CREATE (:Item {id: 3, name: 'cherry', embedding: [0.0, 0.0, 1.0, 0.0]})")
+        _ = try conn.query("CREATE (:Item {id: 4, name: 'date', embedding: [0.0, 0.0, 0.9, 0.1]})")
+        _ = try conn.query("CREATE (:Item {id: 5, name: 'elderberry', embedding: [0.5, 0.5, 0.0, 0.0]})")
+
+        // Create vector index
+        try conn.createVectorIndex(table: "Item", indexName: "item_emb", property: "embedding", metric: "l2")
+
+        // Search nearest to [1.0, 0.0, 0.0, 0.0] — should find apple first, then banana
+        let results = try conn.searchNearest(
+            table: "Item", indexName: "item_emb", queryVector: [1.0, 0.0, 0.0, 0.0], k: 3
+        )
+        XCTAssertEqual(results.count, 3)
+        // Results should be sorted by distance ascending
+        XCTAssertTrue(results[0].distance <= results[1].distance)
+        XCTAssertTrue(results[1].distance <= results[2].distance)
+
+        // Drop index
+        try conn.dropVectorIndex(table: "Item", indexName: "item_emb")
+    }
+
+    func testVectorIndexIfNotExists() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE V(id INT64, emb FLOAT[4], PRIMARY KEY(id))"
+        )
+        _ = try conn.query("CREATE (:V {id: 1, emb: [1.0, 0.0, 0.0, 0.0]})")
+
+        let created = try conn.createVectorIndexIfNotExists(
+            table: "V", indexName: "idx", property: "emb"
+        )
+        XCTAssertTrue(created)
+
+        let createdAgain = try conn.createVectorIndexIfNotExists(
+            table: "V", indexName: "idx", property: "emb"
+        )
+        XCTAssertFalse(createdAgain)
+    }
 }
