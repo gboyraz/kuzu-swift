@@ -2139,4 +2139,41 @@ final class ConnectionTests: XCTestCase {
 
         try conn.dropHashIndex(table: "MergePerson", property: "email")
     }
+
+    func testMergeOnCreateSetWithVectorIndex() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        // Create table with embedding column
+        _ = try conn.query(
+            "CREATE NODE TABLE Image(id STRING, embedding FLOAT[4], PRIMARY KEY(id))"
+        )
+
+        // Create HNSW vector index on the embedding column
+        _ = try conn.query(
+            "CALL CREATE_VECTOR_INDEX('Image', 'emb_idx', 'embedding', metric := 'cosine')"
+        )
+
+        // MERGE with ON CREATE SET on the embedding column — should NOT throw
+        _ = try conn.query(
+            "MERGE (i:Image {id: 'img1'}) ON CREATE SET i.embedding = [0.1, 0.2, 0.3, 0.4]"
+        )
+
+        // Verify it was inserted
+        let result = try conn.query("MATCH (i:Image {id: 'img1'}) RETURN i.id")
+        XCTAssertTrue(result.hasNext())
+
+        // ON MATCH SET on the embedding column — should also work (no-op for HNSW)
+        _ = try conn.query(
+            "MERGE (i:Image {id: 'img1'}) ON MATCH SET i.embedding = [0.5, 0.6, 0.7, 0.8]"
+        )
+    }
 }

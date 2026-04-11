@@ -108,8 +108,13 @@ public:
 
     std::unique_ptr<UpdateState> initUpdateState(main::ClientContext* /*context*/,
         common::column_id_t /*columnID*/, storage::visible_func /*isVisible*/) override {
-        throw common::RuntimeException{"Cannot set property vec in table embeddings because it is "
-                                       "used in one or more indexes. Try delete and then insert."};
+        return std::make_unique<UpdateState>();
+    }
+
+    void update(transaction::Transaction* /*transaction*/,
+        const common::ValueVector& /*nodeIDVector*/, common::ValueVector& /*propertyVector*/,
+        UpdateState& /*updateState*/) override {
+        // HNSW index is rebuilt from scratch on checkpoint, individual updates are no-ops.
     }
 
     std::unique_ptr<DeleteState> initDeleteState(const transaction::Transaction* /*transaction*/,
