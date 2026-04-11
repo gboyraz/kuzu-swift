@@ -1,6 +1,7 @@
 #pragma once
 
 #include "catalog/catalog_entry/rel_group_catalog_entry.h"
+#include "storage/index/index.h"
 #include "storage/table/rel_table_data.h"
 #include "storage/table/table.h"
 
@@ -220,6 +221,13 @@ public:
     std::vector<common::RelDataDirection> getStorageDirections() const;
     common::table_id_t getRelGroupID() const { return relGroupID; }
 
+    // Index support (same pattern as NodeTable)
+    void addIndex(std::unique_ptr<Index> index);
+    void dropIndex(const std::string& name);
+    std::optional<Index*> getIndex(const std::string& name) const;
+    std::optional<std::reference_wrapper<IndexHolder>> getIndexHolder(const std::string& name);
+    std::vector<IndexHolder>& getIndexes() { return indexes; }
+
     void serialize(common::Serializer& ser) const override;
     void deserialize(main::ClientContext* context, StorageManager* storageManager,
         common::Deserializer& deSer) override;
@@ -249,6 +257,7 @@ private:
     std::mutex relOffsetMtx;
     common::offset_t nextRelOffset;
     std::vector<std::unique_ptr<RelTableData>> directedRelData;
+    std::vector<IndexHolder> indexes;
 };
 
 } // namespace storage

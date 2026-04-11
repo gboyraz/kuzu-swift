@@ -7,6 +7,7 @@
 #include "storage/buffer_manager/spiller.h"
 #include "common/exception/message.h"
 #include "common/exception/runtime.h"
+#include "common/string_utils.h"
 #include "main/client_context.h"
 #include "storage/local_storage/local_rel_table.h"
 #include "storage/local_storage/local_storage.h"
@@ -505,7 +506,7 @@ void RelTable::prepareCommitForNodeGroup(const Transaction* transaction,
     }
 }
 
-bool RelTable::checkpoint(main::ClientContext*, TableCatalogEntry* tableEntry,
+bool RelTable::checkpoint(main::ClientContext* context, TableCatalogEntry* tableEntry,
     PageAllocator& pageAllocator) {
     bool ret = hasChanges;
     if (hasChanges) {
@@ -517,6 +518,9 @@ bool RelTable::checkpoint(main::ClientContext*, TableCatalogEntry* tableEntry,
         }
         for (auto& directedRelData : directedRelData) {
             directedRelData->checkpoint(columnIDs, pageAllocator);
+        }
+        for (auto& index : indexes) {
+            index.checkpoint(context, pageAllocator);
         }
         hasChanges = false;
     }
@@ -537,15 +541,87 @@ void RelTable::serialize(Serializer& ser) const {
     for (auto& directedRelData : directedRelData) {
         directedRelData->serialize(ser);
     }
+    ser.write<uint64_t>(indexes.size());
+    for (auto i = 0u; i < indexes.size(); ++i) {
+        indexes[i].serialize(ser);
+    }
 }
 
-void RelTable::deserialize(main::ClientContext*, StorageManager*, Deserializer& deSer) {
+void RelTable::deserialize(main::ClientContext* context, StorageManager* storageManager,
+    Deserializer& deSer) {
     std::string key;
     deSer.validateDebuggingInfo(key, "next_rel_offset");
     deSer.deserializeValue<offset_t>(nextRelOffset);
     for (auto i = 0u; i < directedRelData.size(); i++) {
         directedRelData[i]->deserialize(deSer, *memoryManager);
     }
+    std::vector<IndexInfo> indexInfos;
+    std::vector<length_t> storageInfoBufferSizes;
+    std::vector<std::unique_ptr<uint8_t[]>> storageInfoBuffers;
+    uint64_t numIndexes = 0u;
+    deSer.deserializeValue<uint64_t>(numIndexes);
+    indexInfos.reserve(numIndexes);
+    storageInfoBufferSizes.reserve(numIndexes);
+    storageInfoBuffers.reserve(numIndexes);
+    for (uint64_t i = 0; i < numIndexes; ++i) {
+        IndexInfo indexInfo = IndexInfo::deserialize(deSer);
+        indexInfos.push_back(indexInfo);
+        uint64_t storageInfoSize = 0u;
+        deSer.deserializeValue<uint64_t>(storageInfoSize);
+        storageInfoBufferSizes.push_back(storageInfoSize);
+        auto storageInfoBuffer = std::make_unique<uint8_t[]>(storageInfoSize);
+        deSer.read(storageInfoBuffer.get(), storageInfoSize);
+        storageInfoBuffers.push_back(std::move(storageInfoBuffer));
+    }
+    indexes.clear();
+    indexes.reserve(indexInfos.size());
+    for (auto i = 0u; i < indexInfos.size(); ++i) {
+        indexes.push_back(IndexHolder(indexInfos[i], std::move(storageInfoBuffers[i]),
+            storageInfoBufferSizes[i]));
+    }
+}
+
+void RelTable::addIndex(std::unique_ptr<Index> index) {
+    if (getIndex(index->getName()).has_value()) {
+        throw common::RuntimeException(
+            "Index with name " + index->getName() + " already exists.");
+    }
+    indexes.push_back(IndexHolder{std::move(index)});
+    hasChanges = true;
+}
+
+void RelTable::dropIndex(const std::string& name) {
+    KU_ASSERT(getIndex(name) != nullptr);
+    for (auto it = indexes.begin(); it != indexes.end(); ++it) {
+        if (common::StringUtils::caseInsensitiveEquals(it->getName(), name)) {
+            KU_ASSERT(it->isLoaded());
+            indexes.erase(it);
+            return;
+        }
+    }
+}
+
+std::optional<std::reference_wrapper<IndexHolder>> RelTable::getIndexHolder(
+    const std::string& name) {
+    for (auto& index : indexes) {
+        if (common::StringUtils::caseInsensitiveEquals(index.getName(), name)) {
+            return index;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<Index*> RelTable::getIndex(const std::string& name) const {
+    for (auto& index : indexes) {
+        if (common::StringUtils::caseInsensitiveEquals(index.getName(), name)) {
+            if (index.isLoaded()) {
+                return index.getIndex();
+            }
+            throw common::RuntimeException(common::stringFormat(
+                "Index {} is not loaded yet. Please load the index before accessing it.", name));
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace storage

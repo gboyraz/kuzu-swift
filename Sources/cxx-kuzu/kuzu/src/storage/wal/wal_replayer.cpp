@@ -3,6 +3,7 @@
 #include "binder/binder.h"
 #include "catalog/catalog.h"
 #include "catalog/catalog_entry/index_catalog_entry.h"
+#include "catalog/catalog_entry/rel_group_catalog_entry.h"
 #include "catalog/catalog_entry/scalar_macro_catalog_entry.h"
 #include "catalog/catalog_entry/sequence_catalog_entry.h"
 #include "catalog/catalog_entry/table_catalog_entry.h"
@@ -318,17 +319,33 @@ void WALReplayer::replayDropCatalogEntryRecord(const WALRecord& walRecord) const
     } break;
     case CatalogEntryType::INDEX_ENTRY: {
         // Before dropping the catalog entry, try to remove the corresponding
-        // IndexHolder from NodeTable (if it was loaded by an extension).
+        // IndexHolder from NodeTable or RelTable (if it was loaded by an extension).
         auto storageManager = clientContext.getStorageManager();
         auto indexEntries = catalog->getIndexEntries(transaction);
         for (auto* idxEntry : indexEntries) {
             if (idxEntry->getOID() == entryID) {
-                auto* table = storageManager->getTable(idxEntry->getTableID());
-                if (table) {
-                    auto& nodeTable = table->cast<NodeTable>();
-                    auto optIdx = nodeTable.getIndexHolder(idxEntry->getIndexName());
+                auto* tableEntry = catalog->getTableCatalogEntry(transaction,
+                    idxEntry->getTableID());
+                if (tableEntry->getType() == CatalogEntryType::REL_GROUP_ENTRY) {
+                    auto& relGroupEntry =
+                        tableEntry->constCast<RelGroupCatalogEntry>();
+                    auto innerOid = relGroupEntry.getSingleRelEntryInfo().oid;
+                    auto& relTable =
+                        storageManager->getTable(innerOid)->cast<RelTable>();
+                    auto optIdx = relTable.getIndexHolder(idxEntry->getIndexName());
                     if (optIdx.has_value()) {
-                        nodeTable.dropIndex(idxEntry->getIndexName());
+                        relTable.dropIndex(idxEntry->getIndexName());
+                    }
+                } else {
+                    auto* table =
+                        storageManager->getTable(idxEntry->getTableID());
+                    if (table) {
+                        auto& nodeTable = table->cast<NodeTable>();
+                        auto optIdx =
+                            nodeTable.getIndexHolder(idxEntry->getIndexName());
+                        if (optIdx.has_value()) {
+                            nodeTable.dropIndex(idxEntry->getIndexName());
+                        }
                     }
                 }
                 break;

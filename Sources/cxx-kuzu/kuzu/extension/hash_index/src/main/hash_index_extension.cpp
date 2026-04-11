@@ -2,14 +2,17 @@
 
 #include "catalog/catalog.h"
 #include "catalog/catalog_entry/index_catalog_entry.h"
+#include "catalog/catalog_entry/rel_group_catalog_entry.h"
 #include "catalog/catalog_entry/table_catalog_entry.h"
 #include "extension/extension.h"
 #include "function/hash_index_functions.h"
 #include "index/secondary_hash_index.h"
 #include "main/client_context.h"
 #include "main/database.h"
+#include "storage/storage_utils.h"
 #include "storage/storage_manager.h"
 #include "storage/table/node_table.h"
+#include "storage/table/rel_table.h"
 
 namespace kuzu {
 namespace hash_index_extension {
@@ -149,6 +152,86 @@ static void rebuildIndex(main::ClientContext* context, storage::StorageManager* 
     }
 }
 
+static void rebuildRelIndex(main::ClientContext* context,
+    storage::StorageManager* storageManager, catalog::IndexCatalogEntry* indexEntry) {
+    auto* catalog = context->getCatalog();
+    auto* transaction = context->getTransaction();
+    auto tableID = indexEntry->getTableID();
+    auto* tableEntry = catalog->getTableCatalogEntry(transaction, tableID);
+    auto& relGroupEntry = tableEntry->constCast<catalog::RelGroupCatalogEntry>();
+    auto innerOid = relGroupEntry.getSingleRelEntryInfo().oid;
+    auto& relTable = storageManager->getTable(innerOid)->cast<storage::RelTable>();
+    auto propertyName = indexEntry->getIndexName();
+    if (!tableEntry->containsProperty(propertyName)) return;
+    auto columnID = tableEntry->getColumnID(propertyName);
+    auto keyType = tableEntry->getProperty(propertyName).getType().getPhysicalType();
+    auto logicalType = tableEntry->getProperty(propertyName).getType().copy();
+    auto hashType = SecondaryHashIndex::getIndexType();
+    storage::IndexInfo indexInfo{propertyName, hashType.typeName, tableID,
+        {columnID}, {keyType},
+        hashType.constraintType == storage::IndexConstraintType::PRIMARY,
+        hashType.definitionType == storage::IndexDefinitionType::BUILTIN};
+    auto storageInfoPtr = std::make_unique<SecondaryHashIndexStorageInfo>(0, columnID);
+    auto index = std::make_unique<SecondaryHashIndex>(
+        std::move(indexInfo), std::move(storageInfoPtr));
+    // Direct CSR scan instead of creating a Connection (avoids deadlock during recovery).
+    auto* mm = context->getMemoryManager();
+    auto directions = relTable.getStorageDirections();
+    if (!directions.empty()) {
+        auto direction = directions[0];
+        auto* tableData = relTable.getDirectedTableData(direction);
+        auto numNodeGroups = tableData->getNumNodeGroups();
+        // Bound node table ID depends on scan direction.
+        auto boundTableID = (direction == common::RelDataDirection::FWD)
+                                ? relTable.getFromNodeTableID()
+                                : relTable.getToNodeTableID();
+        // Output vectors: relID + property.
+        auto relIDVector =
+            std::make_unique<common::ValueVector>(common::LogicalType::INTERNAL_ID(), mm);
+        auto propVector = std::make_unique<common::ValueVector>(logicalType.copy(), mm);
+        auto outState = std::make_shared<common::DataChunkState>();
+        relIDVector->setState(outState);
+        propVector->setState(outState);
+        // Bound node ID vector.
+        auto nodeIDVector =
+            std::make_unique<common::ValueVector>(common::LogicalType::INTERNAL_ID(), mm);
+        auto nodeIDState = std::make_shared<common::DataChunkState>();
+        nodeIDVector->setState(nodeIDState);
+        auto insertState = index->initInsertState(context, nullptr);
+        for (common::node_group_idx_t ng = 0; ng < numNodeGroups; ng++) {
+            auto* nodeGroup = tableData->getNodeGroup(ng);
+            if (!nodeGroup) continue;
+            auto groupStartOffset = storage::StorageUtils::getStartOffsetOfNodeGroup(ng);
+            // Process bound nodes in batches of DEFAULT_VECTOR_CAPACITY.
+            for (uint64_t batchStart = 0;
+                 batchStart < common::StorageConfig::NODE_GROUP_SIZE;
+                 batchStart += common::DEFAULT_VECTOR_CAPACITY) {
+                auto batchSize = std::min(common::DEFAULT_VECTOR_CAPACITY,
+                    common::StorageConfig::NODE_GROUP_SIZE - batchStart);
+                for (uint64_t i = 0; i < batchSize; i++) {
+                    nodeIDVector->setValue<common::nodeID_t>(i,
+                        common::nodeID_t{groupStartOffset + batchStart + i, boundTableID});
+                }
+                nodeIDState->getSelVectorUnsafe().setToUnfiltered(batchSize);
+                auto scanState = std::make_unique<storage::RelTableScanState>(*mm,
+                    nodeIDVector.get(),
+                    std::vector<common::ValueVector*>{relIDVector.get(), propVector.get()},
+                    outState, false /*randomLookup*/);
+                scanState->setToTable(transaction, &relTable,
+                    {storage::REL_ID_COLUMN_ID, columnID}, {}, direction);
+                scanState->initState(transaction, nodeGroup);
+                while (scanState->scanNext(transaction)) {
+                    auto selSize = outState->getSelVector().getSelSize();
+                    if (selSize == 0) continue;
+                    std::vector<common::ValueVector*> indexVectors{propVector.get()};
+                    index->insert(transaction, *relIDVector, indexVectors, *insertState);
+                }
+            }
+        }
+    }
+    relTable.addIndex(std::move(index));
+}
+
 static void initHashIndexEntries(main::ClientContext* context) {
     auto* storageManager = context->getStorageManager();
     if (!storageManager) {
@@ -171,15 +254,31 @@ static void initHashIndexEntries(main::ClientContext* context) {
         if (!indexEntry->isLoaded()) {
             indexEntry->setAuxInfo(std::make_unique<HashIndexAuxInfo>(isUniqueIdx));
         }
-        auto& nodeTable =
-            storageManager->getTable(indexEntry->getTableID())->cast<storage::NodeTable>();
-        auto optionalIndex = nodeTable.getIndexHolder(indexEntry->getIndexName());
-        if (optionalIndex.has_value()) {
-            if (!optionalIndex.value().get().isLoaded()) {
-                optionalIndex.value().get().load(context, storageManager);
+        // Check if this is a rel table index
+        auto* tableEntry = catalog->getTableCatalogEntry(transaction, indexEntry->getTableID());
+        if (tableEntry->getType() == catalog::CatalogEntryType::REL_GROUP_ENTRY) {
+            auto& relGroupEntry = tableEntry->constCast<catalog::RelGroupCatalogEntry>();
+            auto innerOid = relGroupEntry.getSingleRelEntryInfo().oid;
+            auto& relTable = storageManager->getTable(innerOid)->cast<storage::RelTable>();
+            auto optionalIndex = relTable.getIndexHolder(indexEntry->getIndexName());
+            if (optionalIndex.has_value()) {
+                if (!optionalIndex.value().get().isLoaded()) {
+                    optionalIndex.value().get().load(context, storageManager);
+                }
+            } else {
+                rebuildRelIndex(context, storageManager, indexEntry);
             }
         } else {
-            rebuildIndex(context, storageManager, indexEntry, isUniqueIdx);
+            auto& nodeTable =
+                storageManager->getTable(indexEntry->getTableID())->cast<storage::NodeTable>();
+            auto optionalIndex = nodeTable.getIndexHolder(indexEntry->getIndexName());
+            if (optionalIndex.has_value()) {
+                if (!optionalIndex.value().get().isLoaded()) {
+                    optionalIndex.value().get().load(context, storageManager);
+                }
+            } else {
+                rebuildIndex(context, storageManager, indexEntry, isUniqueIdx);
+            }
         }
     }
 }
@@ -194,6 +293,11 @@ void HashIndexExtension::load(main::ClientContext* context) {
     extension::ExtensionUtils::addStandaloneTableFunc<DropUniqueIndexFunction>(db);
     extension::ExtensionUtils::addTableFunc<QueryUniqueIndexFunction>(db);
     extension::ExtensionUtils::addTableFunc<ListUniqueIndexesFunction>(db);
+    // Rel index functions
+    extension::ExtensionUtils::addStandaloneTableFunc<CreateRelHashIndexFunction>(db);
+    extension::ExtensionUtils::addTableFunc<QueryRelHashIndexFunction>(db);
+    extension::ExtensionUtils::addStandaloneTableFunc<DropRelIndexFunction>(db);
+    extension::ExtensionUtils::addTableFunc<ListRelIndexesFunction>(db);
     extension::ExtensionUtils::registerIndexType(db, SecondaryHashIndex::getIndexType());
     extension::ExtensionUtils::registerIndexType(db, SecondaryHashIndex::getUniqueIndexType());
     initHashIndexEntries(context);
