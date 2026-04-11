@@ -34,7 +34,7 @@ public:
     }
 
     DELETE_COPY_AND_MOVE(ValueVector);
-    ~ValueVector() = default;
+    ~ValueVector();
 
     template<typename T>
     std::optional<T> firstNonNull() const {
@@ -95,11 +95,11 @@ public:
     // TODO(Guodong): Rename this to getValueRef
     template<typename T>
     const T& getValue(uint32_t pos) const {
-        return ((T*)valueBuffer.get())[pos];
+        return ((T*)valueBufferPtr_)[pos];
     }
     template<typename T>
     T& getValue(uint32_t pos) {
-        return ((T*)valueBuffer.get())[pos];
+        return ((T*)valueBufferPtr_)[pos];
     }
     template<typename T>
     void setValue(uint32_t pos, T val);
@@ -116,7 +116,7 @@ public:
 
     std::unique_ptr<Value> getAsValue(uint64_t pos) const;
 
-    uint8_t* getData() const { return valueBuffer.get(); }
+    uint8_t* getData() const { return valueBufferPtr_; }
 
     offset_t readNodeOffset(uint32_t pos) const {
         KU_ASSERT(dataType.getLogicalTypeID() == LogicalTypeID::INTERNAL_ID);
@@ -146,7 +146,12 @@ public:
     std::shared_ptr<DataChunkState> state;
 
 private:
-    std::unique_ptr<uint8_t[]> valueBuffer;
+    // When memoryManager_ is available, valueBuffer is backed by a MemoryBuffer (budget-tracked).
+    // When memoryManager_ is nullptr, we fall back to a plain heap allocation.
+    storage::MemoryManager* memoryManager_;
+    std::unique_ptr<storage::MemoryBuffer> mmBuffer_;   // owns the MM allocation (may be nullptr)
+    std::unique_ptr<uint8_t[]> valueBuffer;              // owns the fallback allocation (may be nullptr)
+    uint8_t* valueBufferPtr_;                            // hot-path pointer (always valid after init)
     NullMask nullMask;
     uint32_t numBytesPerValue;
     std::unique_ptr<AuxiliaryBuffer> auxiliaryBuffer;

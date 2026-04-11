@@ -5,6 +5,7 @@
 #include "common/constants.h"
 #include "common/system_config.h"
 #include "common/vector/value_vector.h"
+#include "storage/buffer_manager/memory_manager.h"
 
 namespace kuzu {
 namespace common {
@@ -53,9 +54,13 @@ void ListAuxiliaryBuffer::resize(uint64_t numValues) {
 }
 
 void ListAuxiliaryBuffer::resizeDataVector(ValueVector* dataVector) {
-    auto buffer = std::make_unique<uint8_t[]>(capacity * dataVector->getNumBytesPerValue());
-    memcpy(buffer.get(), dataVector->valueBuffer.get(), size * dataVector->getNumBytesPerValue());
+    const auto newSize = capacity * dataVector->getNumBytesPerValue();
+    const auto copySize = size * dataVector->getNumBytesPerValue();
+    auto buffer = std::make_unique<uint8_t[]>(newSize);
+    memcpy(buffer.get(), dataVector->valueBufferPtr_, copySize);
     dataVector->valueBuffer = std::move(buffer);
+    dataVector->mmBuffer_.reset();
+    dataVector->valueBufferPtr_ = dataVector->valueBuffer.get();
     dataVector->nullMask.resize(capacity);
     // If the dataVector is a struct vector, we need to resize its field vectors.
     if (dataVector->dataType.getPhysicalType() == PhysicalTypeID::STRUCT) {

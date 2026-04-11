@@ -10,13 +10,15 @@
 #include "common/types/value/nested.h"
 #include "common/types/value/value.h"
 #include "common/vector/auxiliary_buffer.h"
+#include "storage/buffer_manager/memory_manager.h"
 
 namespace kuzu {
 namespace common {
 
 ValueVector::ValueVector(LogicalType dataType, storage::MemoryManager* memoryManager,
     std::shared_ptr<DataChunkState> dataChunkState)
-    : dataType{std::move(dataType)}, nullMask{DEFAULT_VECTOR_CAPACITY} {
+    : dataType{std::move(dataType)}, memoryManager_{memoryManager}, valueBufferPtr_{nullptr},
+      nullMask{DEFAULT_VECTOR_CAPACITY} {
     if (this->dataType.getLogicalTypeID() == LogicalTypeID::ANY) {
         // LCOV_EXCL_START
         // Alternatively we can assign a default type here but I don't think it's a good practice.
@@ -31,6 +33,8 @@ ValueVector::ValueVector(LogicalType dataType, storage::MemoryManager* memoryMan
         setState(dataChunkState);
     }
 }
+
+ValueVector::~ValueVector() = default;
 
 void ValueVector::setState(const std::shared_ptr<DataChunkState>& state_) {
     this->state = state_;
@@ -86,7 +90,7 @@ bool ValueVector::setNullFromBits(const uint64_t* srcNullEntries, uint64_t srcOf
 
 template<typename T>
 void ValueVector::setValue(uint32_t pos, T val) {
-    ((T*)valueBuffer.get())[pos] = val;
+    ((T*)valueBufferPtr_)[pos] = val;
 }
 
 void ValueVector::copyFromRowData(uint32_t pos, const uint8_t* rowData) {
@@ -163,7 +167,7 @@ void ValueVector::copyFromValue(uint64_t pos, const Value& value) {
         return;
     }
     setNull(pos, false);
-    auto dstValue = valueBuffer.get() + pos * numBytesPerValue;
+    auto dstValue = valueBufferPtr_ + pos * numBytesPerValue;
     switch (dataType.getPhysicalType()) {
     case PhysicalTypeID::INT64: {
         memcpy(dstValue, &value.val.int64Val, numBytesPerValue);
@@ -364,7 +368,16 @@ uint32_t ValueVector::getDataTypeSize(const LogicalType& type) {
 }
 
 void ValueVector::initializeValueBuffer() {
-    valueBuffer = std::make_unique<uint8_t[]>(numBytesPerValue * DEFAULT_VECTOR_CAPACITY);
+    const auto bufferSize =
+        static_cast<uint64_t>(numBytesPerValue) * DEFAULT_VECTOR_CAPACITY;
+    // TODO(mm-budget): Once the buffer pool budget accounts for valueBuffer allocations
+    // separately (or the headroom is adjusted), switch to:
+    //   mmBuffer_ = memoryManager_->allocateBuffer(false, bufferSize);
+    //   valueBufferPtr_ = mmBuffer_->getData();
+    // For now, use untracked heap allocation to avoid competing with
+    // factorized-table / column-chunk allocations for budget headroom.
+    valueBuffer = std::make_unique<uint8_t[]>(bufferSize);
+    valueBufferPtr_ = valueBuffer.get();
     if (dataType.getPhysicalType() == PhysicalTypeID::STRUCT) {
         // For struct valueVectors, each struct_entry_t stores its current position in the
         // valueVector.
