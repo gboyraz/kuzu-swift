@@ -108,7 +108,8 @@ std::unique_ptr<BoundUpdatingClause> Binder::bindMergeClause(const UpdatingClaus
     }
     if (mergeClause.hasOnCreateSetItems()) {
         for (auto& [lhs, rhs] : mergeClause.getOnCreateSetItemsRef()) {
-            auto setPropertyInfo = bindSetPropertyInfo(lhs.get(), rhs.get());
+            auto setPropertyInfo =
+                bindSetPropertyInfo(lhs.get(), rhs.get(), true /* skipIndexCheck */);
             boundMergeClause->addOnCreateSetPropertyInfo(std::move(setPropertyInfo));
         }
     }
@@ -284,7 +285,7 @@ std::unique_ptr<BoundUpdatingClause> Binder::bindSetClause(const UpdatingClause&
 }
 
 BoundSetPropertyInfo Binder::bindSetPropertyInfo(const ParsedExpression* column,
-    const ParsedExpression* columnData) {
+    const ParsedExpression* columnData, bool skipIndexCheck) {
     auto expr = expressionBinder.bindExpression(*column->getChild(0));
     auto isNode = ExpressionUtil::isNodePattern(*expr);
     auto isRel = ExpressionUtil::isRelPattern(*expr);
@@ -298,20 +299,24 @@ BoundSetPropertyInfo Binder::bindSetPropertyInfo(const ParsedExpression* column,
     auto boundColumnData = boundSetItem.second;
     auto& nodeOrRel = expr->constCast<NodeOrRelExpression>();
     auto& property = boundSetItem.first->constCast<PropertyExpression>();
-    // Check secondary index constraint
-    auto catalog = clientContext->getCatalog();
-    auto transaction = clientContext->getTransaction();
-    for (auto entry : nodeOrRel.getEntries()) {
-        // When setting multi labeled node, skip checking if property is not in current table.
-        if (!property.hasProperty(entry->getTableID())) {
-            continue;
-        }
-        auto propertyID = entry->getPropertyID(property.getPropertyName());
-        if (catalog->containsUnloadedIndex(transaction, entry->getTableID(), propertyID)) {
-            throw BinderException(
-                stringFormat("Cannot set property {} in table {} because it is used in one or more "
-                             "indexes which is unloaded.",
+    // Check secondary index constraint.
+    // Skip for ON CREATE SET in MERGE statements because the node is being created (INSERT),
+    // and INSERT already handles index updates correctly through NodeTable::insert().
+    if (!skipIndexCheck) {
+        auto catalog = clientContext->getCatalog();
+        auto transaction = clientContext->getTransaction();
+        for (auto entry : nodeOrRel.getEntries()) {
+            // When setting multi labeled node, skip checking if property is not in current table.
+            if (!property.hasProperty(entry->getTableID())) {
+                continue;
+            }
+            auto propertyID = entry->getPropertyID(property.getPropertyName());
+            if (catalog->containsUnloadedIndex(transaction, entry->getTableID(), propertyID)) {
+                throw BinderException(stringFormat(
+                    "Cannot set property {} in table {} because it is used in one or more "
+                    "indexes which is unloaded.",
                     property.getPropertyName(), entry->getName()));
+            }
         }
     }
     // Check primary key constraint

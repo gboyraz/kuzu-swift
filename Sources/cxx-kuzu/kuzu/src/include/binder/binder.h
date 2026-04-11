@@ -249,7 +249,7 @@ public:
         const std::vector<PropertyDefinition>& propertyDefinitions);
 
     BoundSetPropertyInfo bindSetPropertyInfo(const parser::ParsedExpression* column,
-        const parser::ParsedExpression* columnData);
+        const parser::ParsedExpression* columnData, bool skipIndexCheck = false);
     expression_pair bindSetItem(const parser::ParsedExpression* column,
         const parser::ParsedExpression* columnData);
 
