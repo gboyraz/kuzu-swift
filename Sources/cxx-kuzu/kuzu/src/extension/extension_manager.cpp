@@ -5,6 +5,7 @@
 #include "common/string_utils.h"
 #include "extension/extension.h"
 #include "generated_extension_loader.h"
+#include "hash_index_extension.h"
 #include "storage/wal/local_wal.h"
 
 namespace kuzu {
@@ -96,6 +97,16 @@ void ExtensionManager::autoLoadLinkedExtensions(main::ClientContext* context) {
     auto trxContext = context->getTransactionContext();
     trxContext->beginRecoveryTransaction();
     loadLinkedExtensions(context, loadedExtensions);
+    trxContext->commit();
+}
+
+void ExtensionManager::reconcileAfterRecovery(main::ClientContext* context) {
+    // After WAL replay, extension-managed indexes may exist in the catalog but not
+    // in the NodeTable (because WAL only replays catalog entries, not IndexHolders).
+    // Re-run the hash index reconciliation to detect missing IndexHolders and rebuild them.
+    auto trxContext = context->getTransactionContext();
+    trxContext->beginRecoveryTransaction();
+    hash_index_extension::HashIndexExtension::reconcileIndexes(context);
     trxContext->commit();
 }
 

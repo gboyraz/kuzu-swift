@@ -56,6 +56,10 @@ public:
     }
     std::optional<std::reference_wrapper<const IndexType>> getIndexType(
         const std::string& typeName) const;
+    // Lookup by typeName AND definitionType to disambiguate between builtin and
+    // extension index types that share the same typeName (e.g. both "HASH").
+    std::optional<std::reference_wrapper<const IndexType>> getIndexType(
+        const std::string& typeName, IndexDefinitionType definitionType) const;
 
     void serialize(const catalog::Catalog& catalog, common::Serializer& ser);
     // We need to pass in the catalog and storageManager explicitly as they can be from
