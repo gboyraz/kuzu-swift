@@ -4,7 +4,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "catalog/catalog.h"
 #include "catalog/catalog_entry/index_catalog_entry.h"
+#include "main/client_context.h"
 #include "common/serializer/buffer_reader.h"
 #include "common/serializer/buffer_writer.h"
 #include "common/serializer/deserializer.h"
@@ -33,9 +35,15 @@ struct HashIndexAuxInfo final : catalog::IndexAuxInfo {
         return std::make_unique<HashIndexAuxInfo>(isUnique);
     }
     std::string toCypher(const catalog::IndexCatalogEntry& indexEntry,
-        const catalog::ToCypherInfo& /*info*/) const override {
+        const catalog::ToCypherInfo& info) const override {
+        auto& indexToCypherInfo = info.constCast<catalog::IndexToCypherInfo>();
+        auto context = indexToCypherInfo.context;
+        auto catalog = context->getCatalog();
+        auto tableEntry =
+            catalog->getTableCatalogEntry(context->getTransaction(), indexEntry.getTableID());
+        auto tableName = tableEntry->getName();
         auto funcName = isUnique ? "CREATE_UNIQUE_INDEX" : "CREATE_HASH_INDEX";
-        return std::string("CALL ") + funcName + "('" + indexEntry.getIndexName() + "', '" +
+        return std::string("CALL ") + funcName + "('" + tableName + "', '" +
                indexEntry.getIndexName() + "');";
     }
 };

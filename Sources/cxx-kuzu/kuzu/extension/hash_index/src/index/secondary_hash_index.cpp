@@ -315,8 +315,8 @@ void SecondaryHashIndex::insert(transaction::Transaction* /*transaction*/,
                 innerIndex->lookupOffsets(reinterpret_cast<const uint8_t*>(&kuStr), existing);
                 if (!existing.empty()) {
                     throw RuntimeException(stringFormat(
-                        "Unique constraint violation: duplicate value '{}' for property '{}' on table '{}'",
-                        compositeKey, indexInfo.name, indexInfo.name));
+                        "Unique constraint violation: duplicate value '{}' for index '{}'",
+                        compositeKey, indexInfo.name));
                 }
             }
             innerIndex->insertEntry(reinterpret_cast<const uint8_t*>(&kuStr), nodeOffset);
@@ -330,8 +330,8 @@ void SecondaryHashIndex::insert(transaction::Transaction* /*transaction*/,
                 if (!existing.empty()) {
                     auto valStr = vectorValueToString(propVector, pos);
                     throw RuntimeException(stringFormat(
-                        "Unique constraint violation: duplicate value '{}' for property '{}' on table '{}'",
-                        valStr, indexInfo.name, indexInfo.name));
+                        "Unique constraint violation: duplicate value '{}' for index '{}'",
+                        valStr, indexInfo.name));
                 }
             }
             innerIndex->insertEntry(keyData, nodeOffset);
@@ -375,8 +375,8 @@ void SecondaryHashIndex::update(transaction::Transaction* /*transaction*/,
                     for (auto existingOffset : existing) {
                         if (existingOffset != nodeOffset) {
                             throw RuntimeException(stringFormat(
-                                "Unique constraint violation: duplicate value '{}' for property '{}' on table '{}'",
-                                newKey, indexInfo.name, indexInfo.name));
+                                "Unique constraint violation: duplicate value '{}' for index '{}'",
+                                newKey, indexInfo.name));
                         }
                     }
                 }
@@ -393,8 +393,8 @@ void SecondaryHashIndex::update(transaction::Transaction* /*transaction*/,
                         if (existingOffset != nodeOffset) {
                             auto valStr = vectorValueToString(&propertyVector, pos);
                             throw RuntimeException(stringFormat(
-                                "Unique constraint violation: duplicate value '{}' for property '{}' on table '{}'",
-                                valStr, indexInfo.name, indexInfo.name));
+                                "Unique constraint violation: duplicate value '{}' for index '{}'",
+                                valStr, indexInfo.name));
                         }
                     }
                 }
