@@ -1480,6 +1480,9 @@ final class StressTests: XCTestCase {
         let db = try Database(dbPath, config)
         let conn = try Connection(db)
 
+        // Ensure checkpoint happens on DB close for WAL replay correctness
+        _ = try conn.query("CALL force_checkpoint_on_close=true")
+
         // Create schema
         _ = try conn.query("CREATE NODE TABLE TestNode(id INT64, value STRING, PRIMARY KEY(id))")
         _ = try conn.query("CREATE REL TABLE TEST_EDGE(FROM TestNode TO TestNode, weight DOUBLE)")
@@ -1529,7 +1532,7 @@ final class StressTests: XCTestCase {
         // Step 5: Test batch node delete
         do {
             NSLog("[Delete Test] Deleting nodes 900-998...")
-            _ = try conn.query("MATCH (a:TestNode) WHERE a.id >= 900 AND a.id < 999 DELETE a")
+            _ = try conn.query("MATCH (a:TestNode) WHERE a.id >= 900 AND a.id < 999 DETACH DELETE a")
             NSLog("[Delete Test] Batch node delete ✓")
         } catch {
             NSLog("[Delete Test] Batch node delete FAILED: %@", "\(error)")
@@ -1569,7 +1572,7 @@ final class StressTests: XCTestCase {
 
         // Step 9: Checkpoint and reopen
         do {
-            _ = try conn.query("CALL checkpoint()")
+            _ = try conn.query("CHECKPOINT")
             NSLog("[Delete Test] Checkpoint completed")
         } catch {
             NSLog("[Delete Test] Checkpoint FAILED: %@", "\(error)")
@@ -1615,6 +1618,9 @@ final class StressTests: XCTestCase {
         )
         let db = try Database(dbPath, config)
         let conn = try Connection(db)
+
+        // Ensure checkpoint happens on DB close for WAL replay correctness
+        _ = try conn.query("CALL force_checkpoint_on_close=true")
 
         // Create schema
         _ = try conn.query("CREATE NODE TABLE TestNode(id INT64, value STRING, PRIMARY KEY(id))")
@@ -1693,7 +1699,7 @@ final class StressTests: XCTestCase {
 
         // Checkpoint
         do {
-            _ = try conn.query("CALL checkpoint()")
+            _ = try conn.query("CHECKPOINT")
             NSLog("[Delete Scale] Checkpoint completed")
         } catch {
             NSLog("[Delete Scale] Checkpoint FAILED: %@", "\(error)")
