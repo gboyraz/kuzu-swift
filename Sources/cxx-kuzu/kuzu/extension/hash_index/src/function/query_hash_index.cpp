@@ -51,7 +51,6 @@ static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
         throw BinderException(
             stringFormat("Table {} doesn't have an index with name {}.", tableName, indexName));
     }
-    // Get the index and perform lookup
     auto storageManager = context->getStorageManager();
     auto& nodeTable =
         storageManager->getTable(tableID)->cast<storage::NodeTable>();
@@ -62,63 +61,77 @@ static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
     }
     auto* index = &indexOpt.value()->cast<SecondaryHashIndex>();
 
-    // Get the lookup value and convert to key data
-    auto lookupValue = input->getLiteralVal<std::string>(2);
     std::vector<offset_t> resultOffsets;
 
-    // Perform lookup based on key type
-    auto keyType = index->getIndexInfo().keyDataTypes[0];
-    TypeUtils::visit(
-        keyType,
-        [&](ku_string_t) {
-            ku_string_t kuStr(lookupValue.data(), lookupValue.size());
-            index->lookup(reinterpret_cast<const uint8_t*>(&kuStr), resultOffsets);
-        },
-        [&](int64_t) {
-            auto val = std::stoll(lookupValue);
-            index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
-        },
-        [&](int32_t) {
-            auto val = static_cast<int32_t>(std::stoi(lookupValue));
-            index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
-        },
-        [&](int16_t) {
-            auto val = static_cast<int16_t>(std::stoi(lookupValue));
-            index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
-        },
-        [&](int8_t) {
-            auto val = static_cast<int8_t>(std::stoi(lookupValue));
-            index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
-        },
-        [&](uint64_t) {
-            auto val = std::stoull(lookupValue);
-            index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
-        },
-        [&](uint32_t) {
-            auto val = static_cast<uint32_t>(std::stoul(lookupValue));
-            index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
-        },
-        [&](uint16_t) {
-            auto val = static_cast<uint16_t>(std::stoul(lookupValue));
-            index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
-        },
-        [&](uint8_t) {
-            auto val = static_cast<uint8_t>(std::stoul(lookupValue));
-            index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
-        },
-        [&](double) {
-            auto val = std::stod(lookupValue);
-            index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
-        },
-        [&](float) {
-            auto val = std::stof(lookupValue);
-            index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
-        },
-        [&](auto) {
-            throw BinderException("Unsupported key type for hash index query.");
-        });
+    if (index->isComposite()) {
+        // Composite lookup: third param is comma-separated values
+        auto valuesStr = input->getLiteralVal<std::string>(2);
+        // Split values by comma
+        std::vector<std::string> values;
+        size_t start = 0;
+        for (size_t i = 0; i <= valuesStr.size(); i++) {
+            if (i == valuesStr.size() || valuesStr[i] == ',') {
+                values.push_back(valuesStr.substr(start, i - start));
+                start = i + 1;
+            }
+        }
+        auto compositeKey = SecondaryHashIndex::buildCompositeKey(values);
+        index->lookupComposite(compositeKey, resultOffsets);
+    } else {
+        // Single property lookup (original path)
+        auto lookupValue = input->getLiteralVal<std::string>(2);
+        auto keyType = index->getIndexInfo().keyDataTypes[0];
+        TypeUtils::visit(
+            keyType,
+            [&](ku_string_t) {
+                ku_string_t kuStr(lookupValue.data(), lookupValue.size());
+                index->lookup(reinterpret_cast<const uint8_t*>(&kuStr), resultOffsets);
+            },
+            [&](int64_t) {
+                auto val = std::stoll(lookupValue);
+                index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
+            },
+            [&](int32_t) {
+                auto val = static_cast<int32_t>(std::stoi(lookupValue));
+                index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
+            },
+            [&](int16_t) {
+                auto val = static_cast<int16_t>(std::stoi(lookupValue));
+                index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
+            },
+            [&](int8_t) {
+                auto val = static_cast<int8_t>(std::stoi(lookupValue));
+                index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
+            },
+            [&](uint64_t) {
+                auto val = std::stoull(lookupValue);
+                index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
+            },
+            [&](uint32_t) {
+                auto val = static_cast<uint32_t>(std::stoul(lookupValue));
+                index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
+            },
+            [&](uint16_t) {
+                auto val = static_cast<uint16_t>(std::stoul(lookupValue));
+                index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
+            },
+            [&](uint8_t) {
+                auto val = static_cast<uint8_t>(std::stoul(lookupValue));
+                index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
+            },
+            [&](double) {
+                auto val = std::stod(lookupValue);
+                index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
+            },
+            [&](float) {
+                auto val = std::stof(lookupValue);
+                index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
+            },
+            [&](auto) {
+                throw BinderException("Unsupported key type for hash index query.");
+            });
+    }
 
-    // Create output columns
     std::vector<std::string> columnNames = {"node_id"};
     std::vector<LogicalType> columnTypes;
     columnTypes.push_back(LogicalType::INTERNAL_ID());
