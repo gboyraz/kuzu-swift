@@ -38,6 +38,7 @@ public:
         const auto buffer = std::span(reinterpret_cast<uint8_t*>(p), size * sizeof(T));
         if (buffer.data() != nullptr) {
             mm->freeBlock(common::INVALID_PAGE_IDX, buffer);
+            mm->updateUsedMemoryForFreedBlock(common::INVALID_PAGE_IDX, buffer);
         }
     }
 
