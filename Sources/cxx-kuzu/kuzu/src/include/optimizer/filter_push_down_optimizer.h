@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "planner/operator/logical_plan.h"
 
 namespace kuzu {
@@ -28,6 +30,22 @@ struct PredicateSet {
     std::pair<std::shared_ptr<binder::Expression>, std::string>
     popNodeSecondaryIndexComparison(const binder::Expression& nodeID,
         common::table_id_t tableID, main::ClientContext* context);
+
+    // Range index: returns predicates for range scan on a property with a RANGE index.
+    // Returns {propertyName, predicateIndices, minExpr, maxExpr, minInclusive, maxInclusive}.
+    struct RangeIndexMatch {
+        std::string propertyName;
+        common::column_id_t columnID;
+        std::shared_ptr<binder::Expression> minKey;
+        std::shared_ptr<binder::Expression> maxKey;
+        bool minInclusive = false;
+        bool maxInclusive = false;
+        std::vector<common::idx_t> predicateIndices; // indices into nonEqualityPredicates to remove
+    };
+    std::optional<RangeIndexMatch> popNodeRangeIndexComparison(
+        const binder::Expression& nodeID,
+        common::table_id_t tableID, main::ClientContext* context);
+
     binder::expression_vector getAllPredicates();
 
 private:

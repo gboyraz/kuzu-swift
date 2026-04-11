@@ -1463,4 +1463,271 @@ final class ConnectionTests: XCTestCase {
             try conn.dropHashIndex(table: "WalBool", property: "active")
         }
     }
+
+    // MARK: - Range Index Tests
+
+    private func makeRangeTestDb() throws -> (Database, Connection) {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+        _ = try conn.query("""
+            CREATE NODE TABLE RangeTest(
+                id INT64, name STRING, age INT64, score DOUBLE, PRIMARY KEY(id))
+        """)
+        _ = try conn.query("CREATE (:RangeTest {id:1, name:'Alice', age:25, score:85.5})")
+        _ = try conn.query("CREATE (:RangeTest {id:2, name:'Bob', age:30, score:92.0})")
+        _ = try conn.query("CREATE (:RangeTest {id:3, name:'Charlie', age:35, score:78.3})")
+        _ = try conn.query("CREATE (:RangeTest {id:4, name:'Diana', age:28, score:95.1})")
+        _ = try conn.query("CREATE (:RangeTest {id:5, name:'Eve', age:22, score:88.7})")
+        return (memDb, conn)
+    }
+
+    func testRangeIndexBasic() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "age")
+        // Query range 25..30 (inclusive)
+        let results = try conn.queryRange(table: "RangeTest", property: "age", min: "25", max: "30")
+        // Should match Alice(25), Bob(30), Diana(28)
+        XCTAssertEqual(results.count, 3)
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
+
+    func testRangeIndexHalfOpenMin() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "age")
+        // age >= 30
+        let results = try conn.queryRange(table: "RangeTest", property: "age", min: "30")
+        // Should match Bob(30), Charlie(35)
+        XCTAssertEqual(results.count, 2)
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
+
+    func testRangeIndexHalfOpenMax() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "age")
+        // age <= 25
+        let results = try conn.queryRange(table: "RangeTest", property: "age", max: "25")
+        // Should match Alice(25), Eve(22)
+        XCTAssertEqual(results.count, 2)
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
+
+    func testRangeIndexEmptyResult() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "age")
+        // age 100..200 — no matches
+        let results = try conn.queryRange(table: "RangeTest", property: "age", min: "100", max: "200")
+        XCTAssertEqual(results.count, 0)
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
+
+    func testRangeIndexNonUnique() throws {
+        let (_, conn) = try makeRangeTestDb()
+        // Add another person with age 25
+        _ = try conn.query("CREATE (:RangeTest {id:6, name:'Frank', age:25, score:70.0})")
+        try conn.createRangeIndex(table: "RangeTest", property: "age")
+        // Query exactly 25..25
+        let results = try conn.queryRange(table: "RangeTest", property: "age", min: "25", max: "25")
+        // Alice(25) + Frank(25)
+        XCTAssertEqual(results.count, 2)
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
+
+    func testRangeIndexInsertDeleteSync() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "age")
+        // Insert new node
+        _ = try conn.query("CREATE (:RangeTest {id:7, name:'Grace', age:27, score:91.0})")
+        let afterInsert = try conn.queryRange(table: "RangeTest", property: "age", min: "27", max: "27")
+        XCTAssertEqual(afterInsert.count, 1)
+        // Delete Grace
+        _ = try conn.query("MATCH (p:RangeTest) WHERE p.id = 7 DELETE p")
+        let afterDelete = try conn.queryRange(table: "RangeTest", property: "age", min: "27", max: "27")
+        XCTAssertEqual(afterDelete.count, 0)
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
+
+    func testRangeIndexUpdateSync() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "age")
+        // Alice is 25, update to 40
+        _ = try conn.query("MATCH (p:RangeTest) WHERE p.id = 1 SET p.age = 40")
+        // Old value should be gone
+        let oldRange = try conn.queryRange(table: "RangeTest", property: "age", min: "25", max: "25")
+        XCTAssertEqual(oldRange.count, 0)
+        // New value should appear
+        let newRange = try conn.queryRange(table: "RangeTest", property: "age", min: "40", max: "40")
+        XCTAssertEqual(newRange.count, 1)
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
+
+    func testRangeIndexDoubleType() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "score")
+        // score 85.0..92.0 → Alice(85.5), Bob(92.0), Eve(88.7)
+        let results = try conn.queryRange(table: "RangeTest", property: "score", min: "85.0", max: "92.0")
+        XCTAssertEqual(results.count, 3)
+        try conn.dropRangeIndex(table: "RangeTest", property: "score")
+    }
+
+    func testRangeIndexStringType() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "name")
+        // Lexicographic: "Alice".."Charlie" → Alice, Bob, Charlie
+        let results = try conn.queryRange(table: "RangeTest", property: "name", min: "Alice", max: "Charlie")
+        XCTAssertEqual(results.count, 3)
+        try conn.dropRangeIndex(table: "RangeTest", property: "name")
+    }
+
+    func testRangeIndexSurvivesReopen() throws {
+        let dbPath = NSTemporaryDirectory() + "kuzu_range_idx_reopen_" + UUID().uuidString
+        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+
+        let config = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 1,
+            autoCheckpoint: true
+        )
+
+        // Phase 1: Create table, data, range index
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            _ = try conn.query(
+                "CREATE NODE TABLE RangeReopen(id INT64, age INT64, PRIMARY KEY(id))")
+            _ = try conn.query("CREATE (:RangeReopen {id:1, age:20})")
+            _ = try conn.query("CREATE (:RangeReopen {id:2, age:30})")
+            _ = try conn.query("CREATE (:RangeReopen {id:3, age:40})")
+            try conn.createRangeIndex(table: "RangeReopen", property: "age")
+            let r = try conn.queryRange(table: "RangeReopen", property: "age", min: "25", max: "35")
+            XCTAssertEqual(r.count, 1, "Should find age=30 before close")
+        }
+
+        // Phase 2: Reopen and verify
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            let has = try conn.hasRangeIndex(table: "RangeReopen", property: "age")
+            XCTAssertTrue(has, "Range index should exist after reopen")
+            let r = try conn.queryRange(table: "RangeReopen", property: "age", min: "25", max: "35")
+            XCTAssertEqual(r.count, 1, "Should find age=30 after reopen")
+            try conn.dropRangeIndex(table: "RangeReopen", property: "age")
+        }
+    }
+
+    func testRangeIndexIfNotExists() throws {
+        let (_, conn) = try makeRangeTestDb()
+        // First call — creates
+        let created = try conn.createRangeIndexIfNotExists(table: "RangeTest", property: "age")
+        XCTAssertTrue(created)
+        // Second call — already exists
+        let createdAgain = try conn.createRangeIndexIfNotExists(table: "RangeTest", property: "age")
+        XCTAssertFalse(createdAgain)
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
+
+    func testRangeIndexEmptyTable() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+        _ = try conn.query(
+            "CREATE NODE TABLE RangeEmpty(id INT64, val INT64, PRIMARY KEY(id))")
+        // Create index on empty table
+        try conn.createRangeIndex(table: "RangeEmpty", property: "val")
+        // Query should return empty
+        let results = try conn.queryRange(table: "RangeEmpty", property: "val", min: "0", max: "100")
+        XCTAssertEqual(results.count, 0)
+        // Verify index listed
+        let indexes = try conn.listRangeIndexes(table: "RangeEmpty")
+        XCTAssertEqual(indexes.count, 1)
+        XCTAssertEqual(indexes[0], "val")
+        try conn.dropRangeIndex(table: "RangeEmpty", property: "val")
+    }
+
+    // MARK: - Range Index Optimizer Tests
+
+    func testRangeIndexOptimizerSinglePredicate() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "age")
+        // WHERE p.age > 30 should use range index scan
+        let result = try conn.query("MATCH (p:RangeTest) WHERE p.age > 30 RETURN p.name ORDER BY p.name")
+        var names: [String] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                if let name = try tuple.getValue(0) as? String {
+                    names.append(name)
+                }
+            }
+        }
+        result.close()
+        XCTAssertEqual(names, ["Charlie"]) // age 35
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
+
+    func testRangeIndexOptimizerDualPredicate() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "age")
+        // WHERE p.age >= 25 AND p.age <= 30 should use a single range index scan
+        let result = try conn.query("MATCH (p:RangeTest) WHERE p.age >= 25 AND p.age <= 30 RETURN p.name ORDER BY p.name")
+        var names: [String] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                if let name = try tuple.getValue(0) as? String {
+                    names.append(name)
+                }
+            }
+        }
+        result.close()
+        // Alice(25), Bob(30), Diana(28)
+        XCTAssertEqual(names, ["Alice", "Bob", "Diana"])
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
+
+    func testRangeIndexOptimizerNoIndexFallback() throws {
+        let (_, conn) = try makeRangeTestDb()
+        // No range index — should still work via regular scan + filter
+        let result = try conn.query("MATCH (p:RangeTest) WHERE p.age > 30 RETURN p.name")
+        var names: [String] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                if let name = try tuple.getValue(0) as? String {
+                    names.append(name)
+                }
+            }
+        }
+        result.close()
+        XCTAssertEqual(names.count, 1) // Charlie(35)
+    }
+
+    func testRangeIndexOptimizerReversedPredicate() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "age")
+        // WHERE 30 < p.age — reversed operand order, optimizer should still detect it
+        let result = try conn.query("MATCH (p:RangeTest) WHERE 30 < p.age RETURN p.name ORDER BY p.name")
+        var names: [String] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                if let name = try tuple.getValue(0) as? String {
+                    names.append(name)
+                }
+            }
+        }
+        result.close()
+        XCTAssertEqual(names, ["Charlie"]) // age 35
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
 }
