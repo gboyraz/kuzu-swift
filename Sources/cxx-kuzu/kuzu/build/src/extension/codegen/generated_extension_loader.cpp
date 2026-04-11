@@ -30,6 +30,12 @@ void loadLinkedExtensions([[maybe_unused]] main::ClientContext* context,
         loadedExtensions.push_back(LoadedExtension(vector_extension::VectorExtension::EXTENSION_NAME, " ",
             ExtensionSource::STATIC_LINKED));
     }
+{
+        hash_index_extension::HashIndexExtension extension{};
+        extension.load(context);
+        loadedExtensions.push_back(LoadedExtension(hash_index_extension::HashIndexExtension::EXTENSION_NAME, " ",
+            ExtensionSource::STATIC_LINKED));
+    }
 
 }
 

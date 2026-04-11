@@ -3,6 +3,7 @@
 #include "main/client_context.h"
 #include "algo_extension.h"
 #include "fts_extension.h"
+#include "hash_index_extension.h"
 #include "json_extension.h"
 #include "vector_extension.h"
 

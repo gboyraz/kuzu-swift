@@ -71,7 +71,8 @@ static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
     TypeUtils::visit(
         keyType,
         [&](ku_string_t) {
-            index->lookup(reinterpret_cast<const uint8_t*>(lookupValue.data()), resultOffsets);
+            ku_string_t kuStr(lookupValue.data(), lookupValue.size());
+            index->lookup(reinterpret_cast<const uint8_t*>(&kuStr), resultOffsets);
         },
         [&](int64_t) {
             auto val = std::stoll(lookupValue);

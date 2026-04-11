@@ -338,6 +338,51 @@ final class ConnectionTests: XCTestCase {
         )
     }
 
+    func testSecondaryHashIndex() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        // Create table and data
+        _ = try conn.query(
+            "CREATE NODE TABLE HashIdxTest(id INT64, name STRING, email STRING, PRIMARY KEY(id))"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxTest {id: 1, name: 'Ali', email: 'ali@test.com'})"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxTest {id: 2, name: 'Veli', email: 'veli@test.com'})"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxTest {id: 3, name: 'Ayse', email: 'ayse@test.com'})"
+        )
+
+        // Create index on email
+        try conn.createHashIndex(table: "HashIdxTest", property: "email")
+
+        // Lookup existing value
+        let results = try conn.lookupByIndex(
+            table: "HashIdxTest", property: "email", value: "ali@test.com"
+        )
+        XCTAssertEqual(results.count, 1)
+
+        // Lookup non-existent value
+        let empty = try conn.lookupByIndex(
+            table: "HashIdxTest", property: "email", value: "nobody@test.com"
+        )
+        XCTAssertEqual(empty.count, 0)
+
+        // Drop index
+        try conn.dropHashIndex(table: "HashIdxTest", property: "email")
+    }
+
     /// Tests that QueryResult.close() can be called explicitly for eager cleanup.
     func testQueryResultExplicitClose() throws {
         let conn = try Connection(db)
