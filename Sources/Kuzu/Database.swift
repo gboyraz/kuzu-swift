@@ -10,6 +10,8 @@ import Foundation
 @_implementationOnly import cxx_kuzu
 
 /// A class representing a Kuzu database instance.
+///
+/// Database is thread-safe. Multiple Connections can be created from the same Database across threads.
 public final class Database: @unchecked Sendable {
     internal var cDatabase: kuzu_database
 

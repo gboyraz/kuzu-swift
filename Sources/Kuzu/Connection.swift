@@ -9,6 +9,9 @@
 import Foundation
 
 /// Represents a connection to a Kuzu database.
+///
+/// Connection is thread-safe. Multiple threads can call ``query(_:)`` and ``execute(_:_:)`` concurrently.
+/// Queries are serialized internally via C++ mutex — for true parallelism, use separate Connections.
 public final class Connection: @unchecked Sendable {
     internal var cConnection: kuzu_connection
     internal var database: Database

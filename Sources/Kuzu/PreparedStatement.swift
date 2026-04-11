@@ -10,7 +10,18 @@
 /// A class representing a prepared statement in Kuzu.
 /// PreparedStatement can be used to execute a query with parameters.
 /// It is returned by the `prepare` method of Connection.
-public final class PreparedStatement: @unchecked Sendable {
+///
+/// PreparedStatement is **NOT** thread-safe. Do not share instances across threads or async tasks.
+/// Create a separate PreparedStatement per thread, or use ``Connection/query(_:)`` for simple cases.
+///
+/// For concurrent access, create separate Connection + PreparedStatement pairs:
+/// ```swift
+/// // Each task gets its own connection and statement
+/// let conn = try Connection(db)
+/// let stmt = try conn.prepare("MATCH (n {id: $id}) RETURN n")
+/// let result = try conn.execute(stmt, ["id": myId])
+/// ```
+public final class PreparedStatement {
     internal var cPreparedStatement: kuzu_prepared_statement
     internal var connection: Connection
 
