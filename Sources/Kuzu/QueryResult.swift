@@ -82,15 +82,17 @@ public final class QueryResult: CustomStringConvertible, Sequence, @unchecked
     /// Returns the string representation of the QueryResult.
     /// The string representation contains the column names and the tuples in the result set.
     public var description: String {
+        guard !isDestroyed else { return "<closed QueryResult>" }
         let cString: UnsafeMutablePointer<CChar> = kuzu_query_result_to_string(
             &cQueryResult
         )
-        defer { free(UnsafeMutableRawPointer(mutating: cString)) }
+        defer { kuzu_destroy_string(cString) }
         return String(cString: cString)
     }
 
     /// Returns true if there is at least one more tuple in the result set.
     public func hasNext() -> Bool {
+        guard !isDestroyed else { return false }
         return kuzu_query_result_has_next(&cQueryResult)
     }
 
@@ -98,6 +100,7 @@ public final class QueryResult: CustomStringConvertible, Sequence, @unchecked
     /// - Returns: The next tuple, or nil if there are no more tuples.
     /// - Throws: `KuzuError.getFlatTupleFailed` if retrieving the next tuple fails.
     public func getNext() throws -> FlatTuple? {
+        guard !isDestroyed else { return nil }
         if !self.hasNext() {
             return nil
         }
@@ -113,6 +116,7 @@ public final class QueryResult: CustomStringConvertible, Sequence, @unchecked
 
     /// Returns true if not all query results are consumed when multiple query statements are executed.
     public func hasNextQueryResult() -> Bool {
+        guard !isDestroyed else { return false }
         return kuzu_query_result_has_next_query_result(&cQueryResult)
     }
 
@@ -120,6 +124,7 @@ public final class QueryResult: CustomStringConvertible, Sequence, @unchecked
     /// - Returns: The next query result, or nil if there are no more results.
     /// - Throws: `KuzuError.getNextQueryResultFailed` if retrieving the next query result fails.
     public func getNextQueryResult() throws -> QueryResult? {
+        guard !isDestroyed else { return nil }
         if !self.hasNextQueryResult() {
             return nil
         }
@@ -139,6 +144,7 @@ public final class QueryResult: CustomStringConvertible, Sequence, @unchecked
     /// Resets the iterator of the QueryResult. After calling this method, the `getNext`
     /// method can be called to iterate over the result set from the beginning.
     public func resetIterator() {
+        guard !isDestroyed else { return }
         kuzu_query_result_reset_iterator(&cQueryResult)
     }
 
@@ -147,6 +153,7 @@ public final class QueryResult: CustomStringConvertible, Sequence, @unchecked
         if let columnNames = self.columnNames {
             return columnNames
         }
+        guard !isDestroyed else { return [] }
 
         let numColumns = self.getColumnCount()
         columnNames = []
@@ -162,16 +169,19 @@ public final class QueryResult: CustomStringConvertible, Sequence, @unchecked
 
     /// Returns the number of columns in the QueryResult.
     public func getColumnCount() -> UInt64 {
+        guard !isDestroyed else { return 0 }
         return kuzu_query_result_get_num_columns(&cQueryResult)
     }
 
     /// Returns the number of rows in the QueryResult.
     public func getRowCount() -> UInt64 {
+        guard !isDestroyed else { return 0 }
         return kuzu_query_result_get_num_tuples(&cQueryResult)
     }
 
     /// Returns the compiling time of the query in milliseconds.
     public func getCompilingTime() -> Double {
+        guard !isDestroyed else { return 0 }
         var cQuerySummary = kuzu_query_summary()
         defer {
             kuzu_query_summary_destroy(&cQuerySummary)
@@ -182,6 +192,7 @@ public final class QueryResult: CustomStringConvertible, Sequence, @unchecked
 
     /// Returns the execution time of the query in milliseconds.
     public func getExecutionTime() -> Double {
+        guard !isDestroyed else { return 0 }
         var cQuerySummary = kuzu_query_summary()
         defer {
             kuzu_query_summary_destroy(&cQuerySummary)

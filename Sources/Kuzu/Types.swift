@@ -14,7 +14,7 @@ public enum KuzuError: Error {
     /// Query execution failed with the given error message.
     case queryExecutionFailed(String)
     /// Statement preparation failed with the given error message.
-    case prepareStatmentFailed(String)
+    case prepareStatementFailed(String)
     /// Value conversion failed with the given error message.
     case valueConversionFailed(String)
     /// Failed to get a flat tuple with the given error message.
@@ -30,7 +30,7 @@ public enum KuzuError: Error {
         case .databaseInitializationFailed(let msg),
             .connectionInitializationFailed(let msg),
             .queryExecutionFailed(let msg),
-            .prepareStatmentFailed(let msg),
+            .prepareStatementFailed(let msg),
             .valueConversionFailed(let msg),
             .getFlatTupleFailed(let msg),
             .getNextQueryResultFailed(let msg),
@@ -42,7 +42,7 @@ public enum KuzuError: Error {
 
 /// Represents the internal ID of a node or relationship in Kuzu.
 /// It conforms to the Equatable protocol for easy comparison.
-public struct KuzuInternalId: Equatable {
+public struct KuzuInternalId: Equatable, Sendable {
     /// The table ID of the node or relationship.
     public let tableId: UInt64
     /// The offset within the table.

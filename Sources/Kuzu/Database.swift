@@ -18,9 +18,6 @@ public final class Database: @unchecked Sendable {
     /// The original buffer pool size configured at initialization, used to restore after pressure.
     private let originalBufferPoolSize: UInt64
 
-    /// The current memory pressure level.
-    private var currentPressureLevel: MemoryPressureLevel = .normal
-
     #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
         /// Dispatch source that monitors OS memory pressure events.
         private var memoryPressureSource: DispatchSourceMemoryPressure?
@@ -69,7 +66,6 @@ public final class Database: @unchecked Sendable {
     /// - `.critical`: reduced to 50% of original size
     /// - `.emergency`: reduced to 25% of original size
     public func handleMemoryPressure(level: MemoryPressureLevel) {
-        currentPressureLevel = level
         let ratio: Double
         switch level {
         case .normal:
