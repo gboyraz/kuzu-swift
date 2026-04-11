@@ -44,6 +44,7 @@ void HashIndexExtension::load(main::ClientContext* context) {
     extension::ExtensionUtils::addStandaloneTableFunc<CreateHashIndexFunction>(db);
     extension::ExtensionUtils::addStandaloneTableFunc<DropHashIndexFunction>(db);
     extension::ExtensionUtils::addTableFunc<QueryHashIndexFunction>(db);
+    extension::ExtensionUtils::addTableFunc<ListHashIndexesFunction>(db);
     extension::ExtensionUtils::registerIndexType(db, SecondaryHashIndex::getIndexType());
     initHashIndexEntries(context);
 }

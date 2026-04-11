@@ -20,6 +20,11 @@ struct QueryHashIndexFunction final {
     static function::function_set getFunctionSet();
 };
 
+struct ListHashIndexesFunction final {
+    static constexpr const char* name = "LIST_HASH_INDEXES";
+    static function::function_set getFunctionSet();
+};
+
 } // namespace hash_index_extension
 } // namespace kuzu
 

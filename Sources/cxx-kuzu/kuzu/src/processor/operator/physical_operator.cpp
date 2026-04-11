@@ -84,6 +84,8 @@ std::string PhysicalOperatorUtils::operatorTypeToString(PhysicalOperatorType ope
         return "PATH_PROPERTY_PROBE";
     case PhysicalOperatorType::PRIMARY_KEY_SCAN_NODE_TABLE:
         return "PRIMARY_KEY_SCAN_NODE_TABLE";
+    case PhysicalOperatorType::SECONDARY_INDEX_SCAN_NODE_TABLE:
+        return "SECONDARY_INDEX_SCAN_NODE_TABLE";
     case PhysicalOperatorType::PROJECTION:
         return "PROJECTION";
     case PhysicalOperatorType::PROFILE:

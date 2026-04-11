@@ -151,6 +151,13 @@ public:
         // DO NOTHING.
     }
 
+    // Secondary index lookup: returns offsets matching the given key data.
+    // Override in secondary index implementations.
+    virtual bool lookup(const uint8_t* /*keyData*/,
+        std::vector<common::offset_t>& /*result*/) const {
+        return false;
+    }
+
     virtual void checkpointInMemory() {
         // DO NOTHING.
     };

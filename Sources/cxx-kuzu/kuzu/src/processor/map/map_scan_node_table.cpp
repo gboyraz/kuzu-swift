@@ -6,6 +6,7 @@
 #include "processor/expression_mapper.h"
 #include "processor/operator/scan/primary_key_scan_node_table.h"
 #include "processor/operator/scan/scan_node_table.h"
+#include "processor/operator/scan/secondary_index_scan_node_table.h"
 #include "processor/plan_mapper.h"
 #include "storage/storage_manager.h"
 
@@ -84,6 +85,18 @@ std::unique_ptr<PhysicalOperator> PlanMapper::mapScanNodeTable(
             primaryKeyScanInfo.key->toString(), alias);
         return std::make_unique<PrimaryKeyScanNodeTable>(std::move(scanInfo), std::move(tableInfos),
             std::move(evaluator), std::move(sharedState), getOperatorID(), std::move(printInfo));
+    }
+    case LogicalScanNodeTableType::SECONDARY_INDEX_SCAN: {
+        auto& indexScanInfo = scan.getExtraInfo()->constCast<SecondaryIndexScanInfo>();
+        auto exprMapper = ExpressionMapper(outSchema);
+        auto evaluator = exprMapper.getEvaluator(indexScanInfo.key);
+        auto sharedState =
+            std::make_shared<SecondaryIndexScanSharedState>(tableInfos.size());
+        auto printInfo = std::make_unique<SecondaryIndexScanPrintInfo>(scan.getProperties(),
+            indexScanInfo.key->toString(), alias, indexScanInfo.propertyName);
+        return std::make_unique<SecondaryIndexScanNodeTable>(std::move(scanInfo),
+            std::move(tableInfos), std::move(evaluator), indexScanInfo.propertyName,
+            std::move(sharedState), getOperatorID(), std::move(printInfo));
     }
     default:
         KU_UNREACHABLE;
