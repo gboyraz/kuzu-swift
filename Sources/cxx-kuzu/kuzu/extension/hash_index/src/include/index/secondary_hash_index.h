@@ -6,6 +6,8 @@
 
 #include "common/serializer/buffer_reader.h"
 #include "common/serializer/buffer_writer.h"
+#include "common/serializer/deserializer.h"
+#include "common/serializer/serializer.h"
 #include "common/type_utils.h"
 #include "common/types/ku_string.h"
 #include "storage/buffer_manager/memory_manager.h"
@@ -20,6 +22,7 @@ namespace hash_index_extension {
 struct SecondaryHashIndexStorageInfo final : storage::IndexStorageInfo {
     uint64_t numEntries = 0;
     common::column_id_t columnID = common::INVALID_COLUMN_ID;
+    std::vector<uint8_t> serializedData; // checkpoint entry data
 
     SecondaryHashIndexStorageInfo() = default;
     SecondaryHashIndexStorageInfo(uint64_t numEntries, common::column_id_t columnID)
@@ -38,10 +41,13 @@ public:
     virtual ~InnerSecondaryIndex() = default;
     virtual void insertEntry(const uint8_t* keyData, common::offset_t nodeOffset) = 0;
     virtual void deleteEntry(const uint8_t* keyData, common::offset_t nodeOffset) = 0;
+    virtual void deleteByOffset(common::offset_t nodeOffset) = 0;
     virtual bool lookupOffsets(const uint8_t* keyData,
         std::vector<common::offset_t>& result) const = 0;
     virtual uint64_t size() const = 0;
     virtual void clear() = 0;
+    virtual void serializeEntries(common::Serializer& serializer) const = 0;
+    virtual void deserializeEntries(common::Deserializer& deserializer) = 0;
 };
 
 template<typename T>
@@ -51,17 +57,22 @@ class TypedInnerSecondaryIndex final : public InnerSecondaryIndex {
 public:
     void insertEntry(const uint8_t* keyData, common::offset_t nodeOffset) override;
     void deleteEntry(const uint8_t* keyData, common::offset_t nodeOffset) override;
+    void deleteByOffset(common::offset_t nodeOffset) override;
     bool lookupOffsets(const uint8_t* keyData,
         std::vector<common::offset_t>& result) const override;
     uint64_t size() const override { return totalEntries; }
     void clear() override {
         entries.clear();
+        reverseMap.clear();
         totalEntries = 0;
     }
+    void serializeEntries(common::Serializer& serializer) const override;
+    void deserializeEntries(common::Deserializer& deserializer) override;
 
 private:
     KeyType extractKey(const uint8_t* data) const;
     std::unordered_map<KeyType, std::vector<common::offset_t>> entries;
+    std::unordered_map<common::offset_t, KeyType> reverseMap; // offset → key for deletion
     uint64_t totalEntries = 0;
 };
 

@@ -20,6 +20,12 @@ std::shared_ptr<BufferWriter> SecondaryHashIndexStorageInfo::serialize() const {
     auto serializer = Serializer(bufferWriter);
     serializer.write<uint64_t>(numEntries);
     serializer.write<column_id_t>(columnID);
+    // Write serialized entry data length + bytes
+    uint64_t dataSize = serializedData.size();
+    serializer.write<uint64_t>(dataSize);
+    if (dataSize > 0) {
+        serializer.write(serializedData.data(), dataSize);
+    }
     return bufferWriter;
 }
 
@@ -30,7 +36,17 @@ std::unique_ptr<IndexStorageInfo> SecondaryHashIndexStorageInfo::deserialize(
     Deserializer deSer{std::move(reader)};
     deSer.deserializeValue<uint64_t>(numEntries);
     deSer.deserializeValue<column_id_t>(columnID);
-    return std::make_unique<SecondaryHashIndexStorageInfo>(numEntries, columnID);
+    auto si = std::make_unique<SecondaryHashIndexStorageInfo>(numEntries, columnID);
+    // Read serialized entry data if present
+    if (!deSer.finished()) {
+        uint64_t dataSize = 0;
+        deSer.deserializeValue<uint64_t>(dataSize);
+        if (dataSize > 0) {
+            si->serializedData.resize(dataSize);
+            deSer.read(si->serializedData.data(), dataSize);
+        }
+    }
+    return si;
 }
 
 // ===========================================================================
@@ -50,6 +66,7 @@ template<typename T>
 void TypedInnerSecondaryIndex<T>::insertEntry(const uint8_t* keyData, offset_t nodeOffset) {
     auto key = extractKey(keyData);
     entries[key].push_back(nodeOffset);
+    reverseMap[nodeOffset] = key;
     totalEntries++;
 }
 
@@ -80,6 +97,66 @@ bool TypedInnerSecondaryIndex<T>::lookupOffsets(const uint8_t* keyData,
         return true;
     }
     return false;
+}
+
+template<typename T>
+void TypedInnerSecondaryIndex<T>::deleteByOffset(offset_t nodeOffset) {
+    auto revIt = reverseMap.find(nodeOffset);
+    if (revIt == reverseMap.end()) {
+        return;
+    }
+    auto& key = revIt->second;
+    auto it = entries.find(key);
+    if (it != entries.end()) {
+        auto& offsets = it->second;
+        auto pos = std::find(offsets.begin(), offsets.end(), nodeOffset);
+        if (pos != offsets.end()) {
+            offsets.erase(pos);
+            totalEntries--;
+            if (offsets.empty()) {
+                entries.erase(it);
+            }
+        }
+    }
+    reverseMap.erase(revIt);
+}
+
+template<typename T>
+void TypedInnerSecondaryIndex<T>::serializeEntries(Serializer& serializer) const {
+    uint64_t numKeys = entries.size();
+    serializer.write<uint64_t>(numKeys);
+    for (auto& [key, offsets] : entries) {
+        if constexpr (std::is_same_v<KeyType, std::string>) {
+            serializer.write<std::string>(key);
+        } else {
+            serializer.write<KeyType>(key);
+        }
+        serializer.serializeVector(offsets);
+    }
+}
+
+template<typename T>
+void TypedInnerSecondaryIndex<T>::deserializeEntries(Deserializer& deserializer) {
+    entries.clear();
+    reverseMap.clear();
+    totalEntries = 0;
+    uint64_t numKeys = 0;
+    deserializer.deserializeValue<uint64_t>(numKeys);
+    for (uint64_t i = 0; i < numKeys; i++) {
+        KeyType key;
+        if constexpr (std::is_same_v<KeyType, std::string>) {
+            deserializer.deserializeValue<std::string>(key);
+        } else {
+            deserializer.deserializeValue<KeyType>(key);
+        }
+        std::vector<offset_t> offsets;
+        deserializer.deserializeVector(offsets);
+        for (auto off : offsets) {
+            reverseMap[off] = key;
+        }
+        totalEntries += offsets.size();
+        entries[std::move(key)] = std::move(offsets);
+    }
 }
 
 // Explicit instantiations for supported types.
@@ -114,9 +191,17 @@ struct SecondaryUpdateState final : Index::UpdateState {
 // SecondaryHashIndex – construction / load
 // ===========================================================================
 SecondaryHashIndex::SecondaryHashIndex(IndexInfo indexInfo,
-    std::unique_ptr<IndexStorageInfo> storageInfo)
-    : Index{std::move(indexInfo), std::move(storageInfo)} {
+    std::unique_ptr<IndexStorageInfo> storageInfoArg)
+    : Index{std::move(indexInfo), std::move(storageInfoArg)} {
     initInnerIndex();
+    // Restore entries from checkpoint data if available
+    auto& si = storageInfo->cast<SecondaryHashIndexStorageInfo>();
+    if (!si.serializedData.empty()) {
+        auto reader =
+            std::make_unique<BufferReader>(si.serializedData.data(), si.serializedData.size());
+        Deserializer deSer{std::move(reader)};
+        innerIndex->deserializeEntries(deSer);
+    }
 }
 
 std::unique_ptr<Index> SecondaryHashIndex::load(main::ClientContext* /*context*/,
@@ -175,11 +260,22 @@ std::unique_ptr<Index::UpdateState> SecondaryHashIndex::initUpdateState(
 }
 
 void SecondaryHashIndex::update(transaction::Transaction* /*transaction*/,
-    const ValueVector& /*nodeIDVector*/, ValueVector& /*propertyVector*/,
+    const ValueVector& nodeIDVector, ValueVector& propertyVector,
     UpdateState& /*updateState*/) {
-    // Update is handled by NodeTable as delete + insert.
-    // If called directly, this is a no-op placeholder since the propagation
-    // goes through delete_ then insert.
+    std::lock_guard<std::mutex> lock(mtx);
+    for (auto i = 0u; i < nodeIDVector.state->getSelSize(); i++) {
+        auto pos = nodeIDVector.state->getSelVector()[i];
+        auto nodeOffset = nodeIDVector.getValue<internalID_t>(pos).offset;
+        // Delete old entry using reverse map
+        innerIndex->deleteByOffset(nodeOffset);
+        // Insert new entry
+        if (!propertyVector.isNull(pos)) {
+            auto* keyData = propertyVector.getData() + propertyVector.getNumBytesPerValue() * pos;
+            innerIndex->insertEntry(keyData, nodeOffset);
+        }
+    }
+    auto& si = storageInfo->cast<SecondaryHashIndexStorageInfo>();
+    si.numEntries = innerIndex->size();
 }
 
 std::unique_ptr<Index::DeleteState> SecondaryHashIndex::initDeleteState(
@@ -190,18 +286,27 @@ std::unique_ptr<Index::DeleteState> SecondaryHashIndex::initDeleteState(
 
 void SecondaryHashIndex::delete_(transaction::Transaction* /*transaction*/,
     const ValueVector& nodeIDVector, DeleteState& /*deleteState*/) {
-    // For delete, we need to know the property value to remove. However, the base
-    // Index::delete_ only provides nodeIDs. In practice, NodeTable calls update() which
-    // handles delete+insert. For direct deletes, we'd need a scan of the property column
-    // to find the value. For now, this is a stub – the secondary index must be rebuilt
-    // or handled via update flow.
-    (void)nodeIDVector;
+    std::lock_guard<std::mutex> lock(mtx);
+    for (auto i = 0u; i < nodeIDVector.state->getSelSize(); i++) {
+        auto pos = nodeIDVector.state->getSelVector()[i];
+        auto nodeOffset = nodeIDVector.getValue<internalID_t>(pos).offset;
+        innerIndex->deleteByOffset(nodeOffset);
+    }
+    auto& si = storageInfo->cast<SecondaryHashIndexStorageInfo>();
+    si.numEntries = innerIndex->size();
 }
 
 void SecondaryHashIndex::checkpoint(main::ClientContext* /*context*/,
     PageAllocator& /*pageAllocator*/) {
-    // In-memory index: nothing to checkpoint to disk for now.
-    // Full disk persistence would serialize innerIndex entries.
+    std::lock_guard<std::mutex> lock(mtx);
+    auto& si = storageInfo->cast<SecondaryHashIndexStorageInfo>();
+    si.numEntries = innerIndex->size();
+    // Serialize all entries into storageInfo for persistence
+    auto entryWriter = std::make_shared<BufferWriter>();
+    auto serializer = Serializer(entryWriter);
+    innerIndex->serializeEntries(serializer);
+    auto data = entryWriter->getData();
+    si.serializedData.assign(data.data.get(), data.data.get() + data.size);
 }
 
 bool SecondaryHashIndex::lookup(const uint8_t* keyData,
