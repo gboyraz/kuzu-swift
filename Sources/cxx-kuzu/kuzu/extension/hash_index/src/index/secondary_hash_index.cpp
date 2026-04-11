@@ -26,6 +26,17 @@ std::shared_ptr<BufferWriter> SecondaryHashIndexStorageInfo::serialize() const {
     if (dataSize > 0) {
         serializer.write(serializedData.data(), dataSize);
     }
+    // Write composite index data
+    uint64_t numCompositeColumns = columnIDs.size();
+    serializer.write<uint64_t>(numCompositeColumns);
+    for (auto cid : columnIDs) {
+        serializer.write<column_id_t>(cid);
+    }
+    uint64_t numPropNames = propertyNames.size();
+    serializer.write<uint64_t>(numPropNames);
+    for (auto& pn : propertyNames) {
+        serializer.write<std::string>(pn);
+    }
     return bufferWriter;
 }
 
@@ -44,6 +55,21 @@ std::unique_ptr<IndexStorageInfo> SecondaryHashIndexStorageInfo::deserialize(
         if (dataSize > 0) {
             si->serializedData.resize(dataSize);
             deSer.read(si->serializedData.data(), dataSize);
+        }
+    }
+    // Read composite index data if present
+    if (!deSer.finished()) {
+        uint64_t numCompositeColumns = 0;
+        deSer.deserializeValue<uint64_t>(numCompositeColumns);
+        si->columnIDs.resize(numCompositeColumns);
+        for (uint64_t i = 0; i < numCompositeColumns; i++) {
+            deSer.deserializeValue<column_id_t>(si->columnIDs[i]);
+        }
+        uint64_t numPropNames = 0;
+        deSer.deserializeValue<uint64_t>(numPropNames);
+        si->propertyNames.resize(numPropNames);
+        for (uint64_t i = 0; i < numPropNames; i++) {
+            deSer.deserializeValue<std::string>(si->propertyNames[i]);
         }
     }
     return si;
@@ -235,22 +261,48 @@ std::unique_ptr<Index::InsertState> SecondaryHashIndex::initInsertState(
     return std::make_unique<SecondaryInsertState>();
 }
 
+// Helper: extract a string representation from a ValueVector at given position.
+static std::string vectorValueToString(const ValueVector* vec, sel_t pos) {
+    return TypeUtils::entryToString(vec->dataType,
+        vec->getData() + vec->getNumBytesPerValue() * pos, const_cast<ValueVector*>(vec));
+}
+
 void SecondaryHashIndex::insert(transaction::Transaction* /*transaction*/,
     const ValueVector& nodeIDVector, const std::vector<ValueVector*>& indexVectors,
     InsertState& /*insertState*/) {
     KU_ASSERT(!indexVectors.empty());
-    auto* propVector = indexVectors[0];
+    auto& si = storageInfo->cast<SecondaryHashIndexStorageInfo>();
+    const bool composite = si.isComposite();
     std::lock_guard<std::mutex> lock(mtx);
     for (auto i = 0u; i < nodeIDVector.state->getSelSize(); i++) {
         auto pos = nodeIDVector.state->getSelVector()[i];
-        if (propVector->isNull(pos)) {
-            continue;
-        }
         auto nodeOffset = nodeIDVector.getValue<internalID_t>(pos).offset;
-        auto* keyData = propVector->getData() + propVector->getNumBytesPerValue() * pos;
-        innerIndex->insertEntry(keyData, nodeOffset);
+        if (composite) {
+            // Check if ANY property is null — skip entire row if so
+            bool hasNull = false;
+            for (auto* vec : indexVectors) {
+                if (vec->isNull(pos)) {
+                    hasNull = true;
+                    break;
+                }
+            }
+            if (hasNull) continue;
+            // Build composite key from all property vectors
+            std::vector<std::string> parts;
+            parts.reserve(indexVectors.size());
+            for (auto* vec : indexVectors) {
+                parts.push_back(vectorValueToString(vec, pos));
+            }
+            auto compositeKey = buildCompositeKey(parts);
+            ku_string_t kuStr(compositeKey.data(), compositeKey.size());
+            innerIndex->insertEntry(reinterpret_cast<const uint8_t*>(&kuStr), nodeOffset);
+        } else {
+            auto* propVector = indexVectors[0];
+            if (propVector->isNull(pos)) continue;
+            auto* keyData = propVector->getData() + propVector->getNumBytesPerValue() * pos;
+            innerIndex->insertEntry(keyData, nodeOffset);
+        }
     }
-    auto& si = storageInfo->cast<SecondaryHashIndexStorageInfo>();
     si.numEntries = innerIndex->size();
 }
 
@@ -261,20 +313,40 @@ std::unique_ptr<Index::UpdateState> SecondaryHashIndex::initUpdateState(
 
 void SecondaryHashIndex::update(transaction::Transaction* /*transaction*/,
     const ValueVector& nodeIDVector, ValueVector& propertyVector,
-    UpdateState& /*updateState*/) {
+    UpdateState& updateState) {
+    auto& si = storageInfo->cast<SecondaryHashIndexStorageInfo>();
+    auto& updState = updateState.cast<SecondaryUpdateState>();
     std::lock_guard<std::mutex> lock(mtx);
     for (auto i = 0u; i < nodeIDVector.state->getSelSize(); i++) {
         auto pos = nodeIDVector.state->getSelVector()[i];
         auto nodeOffset = nodeIDVector.getValue<internalID_t>(pos).offset;
-        // Delete old entry using reverse map
-        innerIndex->deleteByOffset(nodeOffset);
-        // Insert new entry
-        if (!propertyVector.isNull(pos)) {
-            auto* keyData = propertyVector.getData() + propertyVector.getNumBytesPerValue() * pos;
-            innerIndex->insertEntry(keyData, nodeOffset);
+        if (si.isComposite()) {
+            // For composite: get old composite key, split, replace updated component, rebuild
+            auto oldKeyStr = innerIndex->getKeyStringForOffset(nodeOffset);
+            innerIndex->deleteByOffset(nodeOffset);
+            if (!oldKeyStr.empty() && !propertyVector.isNull(pos)) {
+                auto parts = splitCompositeKey(oldKeyStr);
+                // Find which position in the composite the updated column occupies
+                auto updatedColumnID = updState.columnID;
+                for (size_t ci = 0; ci < si.columnIDs.size(); ci++) {
+                    if (si.columnIDs[ci] == updatedColumnID) {
+                        parts[ci] = vectorValueToString(&propertyVector, pos);
+                        break;
+                    }
+                }
+                auto newKey = buildCompositeKey(parts);
+                ku_string_t kuStr(newKey.data(), newKey.size());
+                innerIndex->insertEntry(reinterpret_cast<const uint8_t*>(&kuStr), nodeOffset);
+            }
+        } else {
+            // Single property update (original behavior)
+            innerIndex->deleteByOffset(nodeOffset);
+            if (!propertyVector.isNull(pos)) {
+                auto* keyData = propertyVector.getData() + propertyVector.getNumBytesPerValue() * pos;
+                innerIndex->insertEntry(keyData, nodeOffset);
+            }
         }
     }
-    auto& si = storageInfo->cast<SecondaryHashIndexStorageInfo>();
     si.numEntries = innerIndex->size();
 }
 
@@ -313,6 +385,42 @@ bool SecondaryHashIndex::lookup(const uint8_t* keyData,
     std::vector<offset_t>& result) const {
     std::lock_guard<std::mutex> lock(mtx);
     return innerIndex->lookupOffsets(keyData, result);
+}
+
+bool SecondaryHashIndex::lookupComposite(const std::string& compositeKey,
+    std::vector<offset_t>& result) const {
+    std::lock_guard<std::mutex> lock(mtx);
+    ku_string_t kuStr(compositeKey.data(), compositeKey.size());
+    return innerIndex->lookupOffsets(reinterpret_cast<const uint8_t*>(&kuStr), result);
+}
+
+std::string SecondaryHashIndex::buildCompositeKey(const std::vector<std::string>& values) {
+    std::string result;
+    for (size_t i = 0; i < values.size(); i++) {
+        if (i > 0) {
+            result += '\0';
+        }
+        result += values[i];
+    }
+    return result;
+}
+
+std::vector<std::string> SecondaryHashIndex::splitCompositeKey(const std::string& compositeKey) {
+    std::vector<std::string> parts;
+    size_t start = 0;
+    for (size_t i = 0; i < compositeKey.size(); i++) {
+        if (compositeKey[i] == '\0') {
+            parts.push_back(compositeKey.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    parts.push_back(compositeKey.substr(start));
+    return parts;
+}
+
+bool SecondaryHashIndex::isComposite() const {
+    auto& si = storageInfo->cast<SecondaryHashIndexStorageInfo>();
+    return si.isComposite();
 }
 
 } // namespace hash_index_extension

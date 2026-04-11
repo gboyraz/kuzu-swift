@@ -1009,4 +1009,197 @@ final class ConnectionTests: XCTestCase {
         )
         XCTAssertFalse(createdAgain)
     }
+
+    // MARK: - Composite Hash Index Tests
+
+    private func makeCompositeTestDb() throws -> (Database, Connection) {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+        _ = try conn.query("""
+            CREATE NODE TABLE Person(
+                id INT64, firstName STRING, lastName STRING, city STRING, age INT64,
+                PRIMARY KEY(id))
+        """)
+        _ = try conn.query("CREATE (:Person {id:1, firstName:'Ali', lastName:'Yilmaz', city:'Istanbul', age:30})")
+        _ = try conn.query("CREATE (:Person {id:2, firstName:'Veli', lastName:'Kaya', city:'Ankara', age:25})")
+        _ = try conn.query("CREATE (:Person {id:3, firstName:'Ayse', lastName:'Demir', city:'Istanbul', age:28})")
+        _ = try conn.query("CREATE (:Person {id:4, firstName:'Ali', lastName:'Kaya', city:'Izmir', age:35})")
+        return (memDb, conn)
+    }
+
+    // 1. Basic composite create/lookup/drop
+    func testCompositeIndexBasicCreateLookupDrop() throws {
+        let (_, conn) = try makeCompositeTestDb()
+        try conn.createCompositeIndex(table: "Person", properties: ["firstName", "lastName"])
+        let results = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "lastName"], values: ["Ali", "Yilmaz"])
+        XCTAssertEqual(results.count, 1)
+        // Drop composite index
+        try conn.dropHashIndex(table: "Person", property: "firstName,lastName")
+        // Verify index is gone
+        let indexes = try conn.listHashIndexes(table: "Person")
+        XCTAssertFalse(indexes.contains("firstName,lastName"))
+    }
+
+    // 2. 2-property composite (firstName + lastName)
+    func testCompositeIndex2Property() throws {
+        let (_, conn) = try makeCompositeTestDb()
+        try conn.createCompositeIndex(table: "Person", properties: ["firstName", "lastName"])
+        // Ali Yilmaz exists
+        let r1 = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "lastName"], values: ["Ali", "Yilmaz"])
+        XCTAssertEqual(r1.count, 1)
+        // Ali Kaya also exists
+        let r2 = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "lastName"], values: ["Ali", "Kaya"])
+        XCTAssertEqual(r2.count, 1)
+        // Ali Demir does NOT exist
+        let r3 = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "lastName"], values: ["Ali", "Demir"])
+        XCTAssertEqual(r3.count, 0)
+        try conn.dropHashIndex(table: "Person", property: "firstName,lastName")
+    }
+
+    // 3. 3-property composite (firstName + lastName + city)
+    func testCompositeIndex3Property() throws {
+        let (_, conn) = try makeCompositeTestDb()
+        try conn.createCompositeIndex(table: "Person", properties: ["firstName", "lastName", "city"])
+        let results = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "lastName", "city"],
+            values: ["Ali", "Yilmaz", "Istanbul"])
+        XCTAssertEqual(results.count, 1)
+        // Wrong city
+        let empty = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "lastName", "city"],
+            values: ["Ali", "Yilmaz", "Ankara"])
+        XCTAssertEqual(empty.count, 0)
+        try conn.dropHashIndex(table: "Person", property: "firstName,lastName,city")
+    }
+
+    // 4. Non-unique composite (multiple nodes same combo)
+    func testCompositeIndexNonUnique() throws {
+        let (_, conn) = try makeCompositeTestDb()
+        // Add another Ali Yilmaz
+        _ = try conn.query("CREATE (:Person {id:5, firstName:'Ali', lastName:'Yilmaz', city:'Bursa', age:40})")
+        try conn.createCompositeIndex(table: "Person", properties: ["firstName", "lastName"])
+        let results = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "lastName"], values: ["Ali", "Yilmaz"])
+        XCTAssertEqual(results.count, 2)
+        try conn.dropHashIndex(table: "Person", property: "firstName,lastName")
+    }
+
+    // 5. Insert sync — new node appears in composite index
+    func testCompositeIndexInsertSync() throws {
+        let (_, conn) = try makeCompositeTestDb()
+        try conn.createCompositeIndex(table: "Person", properties: ["firstName", "lastName"])
+        // Insert new node
+        _ = try conn.query("CREATE (:Person {id:6, firstName:'Fatma', lastName:'Ozturk', city:'Antalya', age:22})")
+        let results = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "lastName"], values: ["Fatma", "Ozturk"])
+        XCTAssertEqual(results.count, 1)
+        try conn.dropHashIndex(table: "Person", property: "firstName,lastName")
+    }
+
+    // 6. Delete sync — deleted node removed from composite index
+    func testCompositeIndexDeleteSync() throws {
+        let (_, conn) = try makeCompositeTestDb()
+        try conn.createCompositeIndex(table: "Person", properties: ["firstName", "lastName"])
+        // Verify Ali Yilmaz exists
+        let before = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "lastName"], values: ["Ali", "Yilmaz"])
+        XCTAssertEqual(before.count, 1)
+        // Delete Ali Yilmaz
+        _ = try conn.query("MATCH (p:Person) WHERE p.id = 1 DELETE p")
+        let after = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "lastName"], values: ["Ali", "Yilmaz"])
+        XCTAssertEqual(after.count, 0)
+        try conn.dropHashIndex(table: "Person", property: "firstName,lastName")
+    }
+
+    // 7. Update sync — property change updates composite index
+    func testCompositeIndexUpdateSync() throws {
+        let (_, conn) = try makeCompositeTestDb()
+        try conn.createCompositeIndex(table: "Person", properties: ["firstName", "lastName"])
+        // Verify current combo exists
+        let before = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "lastName"], values: ["Ali", "Yilmaz"])
+        XCTAssertEqual(before.count, 1)
+        // Update lastName from Yilmaz to Ozcan
+        _ = try conn.query("MATCH (p:Person) WHERE p.id = 1 SET p.lastName = 'Ozcan'")
+        // Old combo should be gone
+        let afterOld = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "lastName"], values: ["Ali", "Yilmaz"])
+        XCTAssertEqual(afterOld.count, 0)
+        // New combo should exist
+        let afterNew = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "lastName"], values: ["Ali", "Ozcan"])
+        XCTAssertEqual(afterNew.count, 1)
+        try conn.dropHashIndex(table: "Person", property: "firstName,lastName")
+    }
+
+    // 8. Mixed types — string + int64 composite
+    func testCompositeIndexMixedTypes() throws {
+        let (_, conn) = try makeCompositeTestDb()
+        try conn.createCompositeIndex(table: "Person", properties: ["firstName", "age"])
+        // Ali,30 exists
+        let results = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "age"], values: ["Ali", "30"])
+        XCTAssertEqual(results.count, 1)
+        // Ali,25 does NOT exist
+        let empty = try conn.lookupByCompositeIndex(
+            table: "Person", properties: ["firstName", "age"], values: ["Ali", "25"])
+        XCTAssertEqual(empty.count, 0)
+        try conn.dropHashIndex(table: "Person", property: "firstName,age")
+    }
+
+    // 9. Null property handling — composite key with null skips entry
+    func testCompositeIndexNullProperty() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+        _ = try conn.query("""
+            CREATE NODE TABLE NullTest(
+                id INT64, firstName STRING, lastName STRING, PRIMARY KEY(id))
+        """)
+        _ = try conn.query("CREATE (:NullTest {id:1, firstName:'Ali', lastName:'Yilmaz'})")
+        // Insert node with null lastName
+        _ = try conn.query("CREATE (:NullTest {id:2, firstName:'Veli'})")
+        try conn.createCompositeIndex(table: "NullTest", properties: ["firstName", "lastName"])
+        // Ali,Yilmaz should be found
+        let r1 = try conn.lookupByCompositeIndex(
+            table: "NullTest", properties: ["firstName", "lastName"], values: ["Ali", "Yilmaz"])
+        XCTAssertEqual(r1.count, 1)
+        // Veli with null lastName should NOT be indexed (null skips)
+        let r2 = try conn.lookupByCompositeIndex(
+            table: "NullTest", properties: ["firstName", "lastName"], values: ["Veli", ""])
+        XCTAssertEqual(r2.count, 0)
+        try conn.dropHashIndex(table: "NullTest", property: "firstName,lastName")
+    }
+
+    // Test createCompositeIndexIfNotExists
+    func testCreateCompositeIndexIfNotExists() throws {
+        let (_, conn) = try makeCompositeTestDb()
+        let created = try conn.createCompositeIndexIfNotExists(
+            table: "Person", properties: ["firstName", "lastName"])
+        XCTAssertTrue(created)
+        let createdAgain = try conn.createCompositeIndexIfNotExists(
+            table: "Person", properties: ["firstName", "lastName"])
+        XCTAssertFalse(createdAgain)
+        try conn.dropHashIndex(table: "Person", property: "firstName,lastName")
+    }
 }

@@ -40,11 +40,20 @@ struct HashIndexAuxInfo final : catalog::IndexAuxInfo {
 struct SecondaryHashIndexStorageInfo final : storage::IndexStorageInfo {
     uint64_t numEntries = 0;
     common::column_id_t columnID = common::INVALID_COLUMN_ID;
+    std::vector<common::column_id_t> columnIDs; // for composite indexes
+    std::vector<std::string> propertyNames;      // for composite indexes
     std::vector<uint8_t> serializedData; // checkpoint entry data
 
     SecondaryHashIndexStorageInfo() = default;
     SecondaryHashIndexStorageInfo(uint64_t numEntries, common::column_id_t columnID)
         : numEntries{numEntries}, columnID{columnID} {}
+    SecondaryHashIndexStorageInfo(uint64_t numEntries,
+        std::vector<common::column_id_t> columnIDs,
+        std::vector<std::string> propertyNames)
+        : numEntries{numEntries}, columnID{columnIDs.empty() ? common::INVALID_COLUMN_ID : columnIDs[0]},
+          columnIDs{std::move(columnIDs)}, propertyNames{std::move(propertyNames)} {}
+
+    bool isComposite() const { return columnIDs.size() > 1; }
 
     std::shared_ptr<common::BufferWriter> serialize() const override;
     static std::unique_ptr<IndexStorageInfo> deserialize(
@@ -66,6 +75,8 @@ public:
     virtual void clear() = 0;
     virtual void serializeEntries(common::Serializer& serializer) const = 0;
     virtual void deserializeEntries(common::Deserializer& deserializer) = 0;
+    // Get the stored key as string for a given offset (used for composite update).
+    virtual std::string getKeyStringForOffset(common::offset_t nodeOffset) const = 0;
 };
 
 template<typename T>
@@ -86,6 +97,15 @@ public:
     }
     void serializeEntries(common::Serializer& serializer) const override;
     void deserializeEntries(common::Deserializer& deserializer) override;
+    std::string getKeyStringForOffset(common::offset_t nodeOffset) const override {
+        auto it = reverseMap.find(nodeOffset);
+        if (it == reverseMap.end()) return "";
+        if constexpr (std::is_same_v<KeyType, std::string>) {
+            return it->second;
+        } else {
+            return common::TypeUtils::toString(it->second);
+        }
+    }
 
 private:
     KeyType extractKey(const uint8_t* data) const;
@@ -138,6 +158,18 @@ public:
 
     // Public lookup API for query functions.
     bool lookup(const uint8_t* keyData, std::vector<common::offset_t>& result) const override;
+
+    // Composite key lookup by pre-built composite key string.
+    bool lookupComposite(const std::string& compositeKey,
+        std::vector<common::offset_t>& result) const;
+
+    // Build a composite key from individual string values using null-byte separator.
+    static std::string buildCompositeKey(const std::vector<std::string>& values);
+
+    // Split a composite key back into individual values.
+    static std::vector<std::string> splitCompositeKey(const std::string& compositeKey);
+
+    bool isComposite() const;
 
 private:
     void initInnerIndex();

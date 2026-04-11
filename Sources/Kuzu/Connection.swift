@@ -283,6 +283,64 @@ public final class Connection: @unchecked Sendable {
         return names
     }
 
+    // MARK: - Composite Hash Index
+
+    /// Creates a composite hash index on multiple properties.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - properties: The names of the properties to include in the composite index.
+    /// - Throws: KuzuError if index creation fails.
+    public func createCompositeIndex(table: String, properties: [String]) throws {
+        let propStr = properties.joined(separator: ",")
+        let result = try query("CALL CREATE_HASH_INDEX('\(table)', '\(propStr)')")
+        result.close()
+    }
+
+    /// Creates a composite hash index if one doesn't already exist.
+    /// Safe to call on every app launch — idempotent.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - properties: The names of the properties to include in the composite index.
+    /// - Returns: `true` if the index was created, `false` if it already existed.
+    /// - Throws: KuzuError if index creation fails for reasons other than the index already existing.
+    @discardableResult
+    public func createCompositeIndexIfNotExists(table: String, properties: [String]) throws -> Bool {
+        do {
+            try createCompositeIndex(table: table, properties: properties)
+            return true
+        } catch {
+            let msg = "\(error)"
+            if msg.contains("already exists") {
+                return false
+            }
+            throw error
+        }
+    }
+
+    /// Looks up node internal IDs by composite indexed property values.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - properties: The names of the indexed properties (in order).
+    ///   - values: The string values to look up (in order matching properties).
+    /// - Returns: An array of matching internal IDs.
+    /// - Throws: KuzuError if the lookup fails.
+    public func lookupByCompositeIndex(table: String, properties: [String], values: [String]) throws -> [KuzuInternalId] {
+        let propStr = properties.joined(separator: ",")
+        let valStr = values.joined(separator: ",")
+        let result = try query("CALL QUERY_HASH_INDEX('\(table)', '\(propStr)', '\(valStr)') RETURN node_id")
+        defer { result.close() }
+        var ids: [KuzuInternalId] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                let val = try tuple.getValue(0)
+                if let id = val as? KuzuInternalId {
+                    ids.append(id)
+                }
+            }
+        }
+        return ids
+    }
+
     // MARK: - HNSW Vector Index
 
     /// Creates an HNSW vector index on an embedding column.
