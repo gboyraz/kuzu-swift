@@ -66,11 +66,7 @@ public final class Connection: @unchecked Sendable {
                 throw KuzuError.queryExecutionFailed(errorMessage)
             }
         }
-        let queryResult = QueryResult(self, cQueryResult)
-        resultLock.lock()
-        lastQueryResult = queryResult
-        resultLock.unlock()
-        return queryResult
+        return QueryResult(self, cQueryResult)
     }
 
     /// Returns a prepared statement for the specified query string.
@@ -111,13 +107,6 @@ public final class Connection: @unchecked Sendable {
         _ preparedStatement: PreparedStatement,
         _ parameters: [String: T?]
     ) throws -> QueryResult {
-        // Eagerly destroy previous results to prevent double-free from shared C++ state.
-        // Must destroy both: (1) the connection-level last result (covers cross-statement
-        // sharing) and (2) the statement-level active result (covers same-statement reuse).
-        resultLock.lock()
-        lastQueryResult?.close()
-        resultLock.unlock()
-        preparedStatement.activeQueryResult?.close()
 
         var cQueryResult = kuzu_query_result()
         for (key, value) in parameters {
@@ -157,12 +146,7 @@ public final class Connection: @unchecked Sendable {
                 throw KuzuError.queryExecutionFailed(errorMessage)
             }
         }
-        let queryResult = QueryResult(self, cQueryResult)
-        preparedStatement.activeQueryResult = queryResult
-        resultLock.lock()
-        lastQueryResult = queryResult
-        resultLock.unlock()
-        return queryResult
+        return QueryResult(self, cQueryResult)
     }
 
     /// Sets the maximum number of threads that can be used for executing a query in parallel.
