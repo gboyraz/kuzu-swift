@@ -165,4 +165,70 @@ public final class Connection: @unchecked Sendable {
     public func interrupt() {
         kuzu_connection_interrupt(&cConnection)
     }
+
+    // MARK: - Secondary Hash Index
+
+    /// Creates a secondary hash index on a node table property for O(1) lookups.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the property to index.
+    /// - Throws: KuzuError if index creation fails.
+    public func createHashIndex(table: String, property: String) throws {
+        let result = try query("CALL CREATE_HASH_INDEX('\(table)', '\(property)')")
+        result.close()
+    }
+
+    /// Looks up node internal IDs by an indexed property value (String).
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the indexed property.
+    ///   - value: The string value to look up.
+    /// - Returns: An array of matching internal IDs.
+    /// - Throws: KuzuError if the lookup fails.
+    public func lookupByIndex(table: String, property: String, value: String) throws -> [KuzuInternalId] {
+        let result = try query("CALL QUERY_HASH_INDEX('\(table)', '\(property)', '\(value)') RETURN node_id")
+        defer { result.close() }
+        var ids: [KuzuInternalId] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                let val = try tuple.getValue(0)
+                if let id = val as? KuzuInternalId {
+                    ids.append(id)
+                }
+            }
+        }
+        return ids
+    }
+
+    /// Looks up node internal IDs by an indexed property value (Int64).
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the indexed property.
+    ///   - value: The integer value to look up.
+    /// - Returns: An array of matching internal IDs.
+    /// - Throws: KuzuError if the lookup fails.
+    public func lookupByIndex(table: String, property: String, value: Int64) throws -> [KuzuInternalId] {
+        let result = try query("CALL QUERY_HASH_INDEX('\(table)', '\(property)', '\(value)') RETURN node_id")
+        defer { result.close() }
+        var ids: [KuzuInternalId] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                let val = try tuple.getValue(0)
+                if let id = val as? KuzuInternalId {
+                    ids.append(id)
+                }
+            }
+        }
+        return ids
+    }
+
+    /// Drops a secondary hash index on a node table property.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the indexed property.
+    /// - Throws: KuzuError if dropping the index fails.
+    public func dropHashIndex(table: String, property: String) throws {
+        let result = try query("CALL DROP_HASH_INDEX('\(table)', '\(property)')")
+        result.close()
+    }
 }

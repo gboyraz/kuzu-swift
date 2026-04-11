@@ -338,6 +338,51 @@ final class ConnectionTests: XCTestCase {
         )
     }
 
+    func testSecondaryHashIndex() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        // Create table and data
+        _ = try conn.query(
+            "CREATE NODE TABLE HashIdxTest(id INT64, name STRING, email STRING, PRIMARY KEY(id))"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxTest {id: 1, name: 'Ali', email: 'ali@test.com'})"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxTest {id: 2, name: 'Veli', email: 'veli@test.com'})"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxTest {id: 3, name: 'Ayse', email: 'ayse@test.com'})"
+        )
+
+        // Create index on email
+        try conn.createHashIndex(table: "HashIdxTest", property: "email")
+
+        // Lookup existing value
+        let results = try conn.lookupByIndex(
+            table: "HashIdxTest", property: "email", value: "ali@test.com"
+        )
+        XCTAssertEqual(results.count, 1)
+
+        // Lookup non-existent value
+        let empty = try conn.lookupByIndex(
+            table: "HashIdxTest", property: "email", value: "nobody@test.com"
+        )
+        XCTAssertEqual(empty.count, 0)
+
+        // Drop index
+        try conn.dropHashIndex(table: "HashIdxTest", property: "email")
+    }
+
     /// Tests that QueryResult.close() can be called explicitly for eager cleanup.
     func testQueryResultExplicitClose() throws {
         let conn = try Connection(db)
@@ -357,5 +402,364 @@ final class ConnectionTests: XCTestCase {
         let tuple = try result2.getNext()!
         let value = try tuple.getValue(0) as! Int64
         XCTAssertEqual(value, 42)
+    }
+
+    // MARK: - Secondary Hash Index Tests
+
+    func testHashIndexAutoSyncOnInsert() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE HashIdxInsertTest(id INT64, email STRING, PRIMARY KEY(id))"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxInsertTest {id: 1, email: 'a@test.com'})"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxInsertTest {id: 2, email: 'b@test.com'})"
+        )
+
+        // Create index BEFORE inserting third node
+        try conn.createHashIndex(table: "HashIdxInsertTest", property: "email")
+
+        // Insert 3rd node AFTER index creation
+        _ = try conn.query(
+            "CREATE (p:HashIdxInsertTest {id: 3, email: 'c@test.com'})"
+        )
+
+        // Lookup the 3rd node by indexed property → should find it
+        let results = try conn.lookupByIndex(
+            table: "HashIdxInsertTest", property: "email", value: "c@test.com"
+        )
+        XCTAssertEqual(results.count, 1, "Post-index insert should be findable via index")
+
+        // Original nodes should still be findable
+        let resultsA = try conn.lookupByIndex(
+            table: "HashIdxInsertTest", property: "email", value: "a@test.com"
+        )
+        XCTAssertEqual(resultsA.count, 1)
+
+        try conn.dropHashIndex(table: "HashIdxInsertTest", property: "email")
+    }
+
+    func testHashIndexAutoSyncOnDelete() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE HashIdxDeleteTest(id INT64, email STRING, PRIMARY KEY(id))"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxDeleteTest {id: 1, email: 'del1@test.com'})"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxDeleteTest {id: 2, email: 'del2@test.com'})"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxDeleteTest {id: 3, email: 'del3@test.com'})"
+        )
+
+        try conn.createHashIndex(table: "HashIdxDeleteTest", property: "email")
+
+        // Delete node with id=2
+        _ = try conn.query(
+            "MATCH (p:HashIdxDeleteTest) WHERE p.id = 2 DELETE p"
+        )
+
+        // Lookup deleted node's property → should return empty
+        let deleted = try conn.lookupByIndex(
+            table: "HashIdxDeleteTest", property: "email", value: "del2@test.com"
+        )
+        XCTAssertEqual(deleted.count, 0, "Deleted node should not be found via index")
+
+        // Remaining nodes should still work
+        let remaining1 = try conn.lookupByIndex(
+            table: "HashIdxDeleteTest", property: "email", value: "del1@test.com"
+        )
+        XCTAssertEqual(remaining1.count, 1)
+
+        let remaining3 = try conn.lookupByIndex(
+            table: "HashIdxDeleteTest", property: "email", value: "del3@test.com"
+        )
+        XCTAssertEqual(remaining3.count, 1)
+
+        try conn.dropHashIndex(table: "HashIdxDeleteTest", property: "email")
+    }
+
+    func testHashIndexAutoSyncOnUpdate() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE HashIdxUpdateTest(id INT64, email STRING, PRIMARY KEY(id))"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxUpdateTest {id: 1, email: 'old@test.com'})"
+        )
+
+        try conn.createHashIndex(table: "HashIdxUpdateTest", property: "email")
+
+        // Update the email
+        _ = try conn.query(
+            "MATCH (p:HashIdxUpdateTest) WHERE p.id = 1 SET p.email = 'new@test.com'"
+        )
+
+        // Lookup old value → should return empty
+        let oldResults = try conn.lookupByIndex(
+            table: "HashIdxUpdateTest", property: "email", value: "old@test.com"
+        )
+        XCTAssertEqual(oldResults.count, 0, "Old value should not be found after update")
+
+        // Lookup new value → should find the node
+        let newResults = try conn.lookupByIndex(
+            table: "HashIdxUpdateTest", property: "email", value: "new@test.com"
+        )
+        XCTAssertEqual(newResults.count, 1, "New value should be found after update")
+
+        try conn.dropHashIndex(table: "HashIdxUpdateTest", property: "email")
+    }
+
+    func testHashIndexPersistenceAfterRestart() throws {
+        let dbPath = NSTemporaryDirectory() + "kuzu_hash_idx_persist_" + UUID().uuidString
+        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+
+        let config = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 1,
+            autoCheckpoint: true
+        )
+
+        // Phase 1: Create DB with data, close it
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+
+            _ = try conn.query(
+                "CREATE NODE TABLE HashIdxPersistTest(id INT64, email STRING, PRIMARY KEY(id))"
+            )
+            _ = try conn.query(
+                "CREATE (p:HashIdxPersistTest {id: 1, email: 'persist1@test.com'})"
+            )
+            _ = try conn.query(
+                "CREATE (p:HashIdxPersistTest {id: 2, email: 'persist2@test.com'})"
+            )
+        }
+
+        // Phase 2: Reopen, create index on existing data, and verify it works
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+
+            // Data should still be there
+            let countResult = try conn.query(
+                "MATCH (p:HashIdxPersistTest) RETURN count(p)"
+            )
+            XCTAssertTrue(countResult.hasNext())
+            let countTuple = try countResult.getNext()!
+            let count = try countTuple.getValue(0) as! Int64
+            XCTAssertEqual(count, 2, "Data should persist after DB restart")
+
+            // Create index on existing data
+            try conn.createHashIndex(table: "HashIdxPersistTest", property: "email")
+
+            // Lookup should work
+            let results = try conn.lookupByIndex(
+                table: "HashIdxPersistTest", property: "email", value: "persist1@test.com"
+            )
+            XCTAssertEqual(results.count, 1, "Index on persisted data should work")
+
+            let results2 = try conn.lookupByIndex(
+                table: "HashIdxPersistTest", property: "email", value: "persist2@test.com"
+            )
+            XCTAssertEqual(results2.count, 1, "Second entry should be found")
+
+            let empty = try conn.lookupByIndex(
+                table: "HashIdxPersistTest", property: "email", value: "nonexistent@test.com"
+            )
+            XCTAssertEqual(empty.count, 0)
+
+            try conn.dropHashIndex(table: "HashIdxPersistTest", property: "email")
+        }
+    }
+
+    func testHashIndexNonUniqueValues() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE HashIdxNonUniqueTest(id INT64, email STRING, PRIMARY KEY(id))"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxNonUniqueTest {id: 1, email: 'shared@test.com'})"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxNonUniqueTest {id: 2, email: 'shared@test.com'})"
+        )
+        _ = try conn.query(
+            "CREATE (p:HashIdxNonUniqueTest {id: 3, email: 'shared@test.com'})"
+        )
+
+        try conn.createHashIndex(table: "HashIdxNonUniqueTest", property: "email")
+
+        let results = try conn.lookupByIndex(
+            table: "HashIdxNonUniqueTest", property: "email", value: "shared@test.com"
+        )
+        XCTAssertEqual(results.count, 3, "Non-unique index should return all 3 matches")
+
+        try conn.dropHashIndex(table: "HashIdxNonUniqueTest", property: "email")
+    }
+
+    func testHashIndexInt64Property() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE HashIdxInt64Test(id INT64, age INT64, PRIMARY KEY(id))"
+        )
+        _ = try conn.query("CREATE (p:HashIdxInt64Test {id: 1, age: 25})")
+        _ = try conn.query("CREATE (p:HashIdxInt64Test {id: 2, age: 30})")
+        _ = try conn.query("CREATE (p:HashIdxInt64Test {id: 3, age: 25})")
+
+        try conn.createHashIndex(table: "HashIdxInt64Test", property: "age")
+
+        // Lookup by Int64 value
+        let results25 = try conn.lookupByIndex(
+            table: "HashIdxInt64Test", property: "age", value: Int64(25)
+        )
+        XCTAssertEqual(results25.count, 2, "Should find 2 nodes with age 25")
+
+        let results30 = try conn.lookupByIndex(
+            table: "HashIdxInt64Test", property: "age", value: Int64(30)
+        )
+        XCTAssertEqual(results30.count, 1, "Should find 1 node with age 30")
+
+        let resultsNone = try conn.lookupByIndex(
+            table: "HashIdxInt64Test", property: "age", value: Int64(99)
+        )
+        XCTAssertEqual(resultsNone.count, 0, "Should find no nodes with age 99")
+
+        try conn.dropHashIndex(table: "HashIdxInt64Test", property: "age")
+    }
+
+    func testHashIndexEmptyTable() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE HashIdxEmptyTest(id INT64, email STRING, PRIMARY KEY(id))"
+        )
+
+        // Create index on empty table → should succeed
+        try conn.createHashIndex(table: "HashIdxEmptyTest", property: "email")
+
+        // Lookup any value → should return empty array
+        let empty = try conn.lookupByIndex(
+            table: "HashIdxEmptyTest", property: "email", value: "anything@test.com"
+        )
+        XCTAssertEqual(empty.count, 0, "Lookup on empty indexed table should return empty")
+
+        // Insert a node → lookup should find it
+        _ = try conn.query(
+            "CREATE (p:HashIdxEmptyTest {id: 1, email: 'first@test.com'})"
+        )
+        let results = try conn.lookupByIndex(
+            table: "HashIdxEmptyTest", property: "email", value: "first@test.com"
+        )
+        XCTAssertEqual(results.count, 1, "Should find node inserted after index creation on empty table")
+
+        try conn.dropHashIndex(table: "HashIdxEmptyTest", property: "email")
+    }
+
+    func testHashIndexInvalidTableOrProperty() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        // Try creating index on non-existent table → should throw error
+        do {
+            try conn.createHashIndex(table: "NonExistentTable", property: "email")
+            XCTFail("Expected error for non-existent table")
+        } catch let error as KuzuError {
+            XCTAssertTrue(
+                error.message.contains("NonExistentTable"),
+                "Error should mention the invalid table name"
+            )
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+
+        // Create a table for the next test
+        _ = try conn.query(
+            "CREATE NODE TABLE HashIdxErrorTest(id INT64, email STRING, PRIMARY KEY(id))"
+        )
+
+        // Try creating index on non-existent property → should throw error
+        do {
+            try conn.createHashIndex(table: "HashIdxErrorTest", property: "nonExistentProp")
+            XCTFail("Expected error for non-existent property")
+        } catch let error as KuzuError {
+            XCTAssertTrue(
+                error.message.contains("nonExistentProp") || error.message.contains("property"),
+                "Error should mention the invalid property: \(error.message)"
+            )
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
     }
 }
