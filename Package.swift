@@ -118,6 +118,7 @@ let package = Package(
                 "kuzu/extension/hash_index/src/index/secondary_hash_index.cpp",
                 "kuzu/extension/hash_index/src/function/create_hash_index.cpp",
                 "kuzu/extension/hash_index/src/function/drop_hash_index.cpp",
+                "kuzu/extension/hash_index/src/function/list_hash_indexes.cpp",
                 "kuzu/extension/hash_index/src/function/query_hash_index.cpp",
                 "kuzu/extension/hash_index/src/main/hash_index_extension.cpp",
                 "kuzu/src/binder/bind/bind_attach_database.cpp",

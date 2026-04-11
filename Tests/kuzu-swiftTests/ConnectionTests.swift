@@ -849,4 +849,94 @@ final class ConnectionTests: XCTestCase {
 
         try conn.dropHashIndex(table: "IdxScanTest", property: "email")
     }
+
+    func testCreateHashIndexIfNotExists() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE T1(id INT64, email STRING, PRIMARY KEY(id))"
+        )
+
+        // First call — creates
+        let created = try conn.createHashIndexIfNotExists(table: "T1", property: "email")
+        XCTAssertTrue(created)
+
+        // Second call — already exists, no error
+        let createdAgain = try conn.createHashIndexIfNotExists(table: "T1", property: "email")
+        XCTAssertFalse(createdAgain)
+
+        try conn.dropHashIndex(table: "T1", property: "email")
+    }
+
+    func testHasHashIndex() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE T2(id INT64, name STRING, PRIMARY KEY(id))"
+        )
+
+        // No index yet
+        let before = try conn.hasHashIndex(table: "T2", property: "name")
+        XCTAssertFalse(before)
+
+        // Create index
+        try conn.createHashIndex(table: "T2", property: "name")
+
+        // Now exists
+        let after = try conn.hasHashIndex(table: "T2", property: "name")
+        XCTAssertTrue(after)
+
+        try conn.dropHashIndex(table: "T2", property: "name")
+    }
+
+    func testListHashIndexes() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE T3(id INT64, name STRING, email STRING, age INT64, PRIMARY KEY(id))"
+        )
+
+        // No indexes
+        let empty = try conn.listHashIndexes(table: "T3")
+        XCTAssertTrue(empty.isEmpty)
+
+        // Create 2 indexes
+        try conn.createHashIndex(table: "T3", property: "name")
+        try conn.createHashIndex(table: "T3", property: "email")
+
+        let indexes = try conn.listHashIndexes(table: "T3")
+        XCTAssertEqual(indexes.count, 2)
+        XCTAssertTrue(indexes.contains("name"))
+        XCTAssertTrue(indexes.contains("email"))
+
+        try conn.dropHashIndex(table: "T3", property: "name")
+        try conn.dropHashIndex(table: "T3", property: "email")
+    }
 }
