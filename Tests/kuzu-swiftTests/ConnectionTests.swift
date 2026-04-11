@@ -288,6 +288,60 @@ final class ConnectionTests: XCTestCase {
         NSLog("testInterleavedPreparedStatementsNoDoubleFree passed — no crash")
     }
 
+    /// Tests that concurrent query/execute calls on the same Connection do not crash
+    /// due to races on lastQueryResult (thread-safety of the NSLock guard).
+    func testConcurrentConnectionAccess() throws {
+        let conn = try Connection(db)
+
+        // Set up a small table for mixed read/write queries
+        _ = try conn.query(
+            "CREATE NODE TABLE ConcItem (id INT64, val STRING, PRIMARY KEY (id));"
+        )
+        for i in 0..<10 {
+            _ = try conn.query("CREATE (n:ConcItem {id: \(i), val: 'init'});")
+        }
+
+        let iterations = 50
+        let workers = 4
+        let expectation = XCTestExpectation(description: "All concurrent workers finish")
+        expectation.expectedFulfillmentCount = workers
+
+        let errors = NSLock()
+        var collectedErrors: [Error] = []
+
+        for workerIdx in 0..<workers {
+            DispatchQueue.global().async {
+                for i in 0..<iterations {
+                    do {
+                        if i % 2 == 0 {
+                            // Read query
+                            let result = try conn.query(
+                                "MATCH (n:ConcItem) RETURN COUNT(n);"
+                            )
+                            _ = result.hasNext()
+                        } else {
+                            // Write query
+                            _ = try conn.query(
+                                "MATCH (n:ConcItem {id: \(workerIdx)}) SET n.val = 'w\(workerIdx)_i\(i)';"
+                            )
+                        }
+                    } catch {
+                        errors.lock()
+                        collectedErrors.append(error)
+                        errors.unlock()
+                    }
+                }
+                expectation.fulfill()
+            }
+        }
+
+        wait(for: [expectation], timeout: 60.0)
+        XCTAssertTrue(
+            collectedErrors.isEmpty,
+            "Concurrent access produced errors: \(collectedErrors)"
+        )
+    }
+
     /// Tests that QueryResult.close() can be called explicitly for eager cleanup.
     func testQueryResultExplicitClose() throws {
         let conn = try Connection(db)
