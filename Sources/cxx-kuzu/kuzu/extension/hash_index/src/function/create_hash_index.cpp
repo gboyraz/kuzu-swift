@@ -148,7 +148,7 @@ static offset_t tableFunc(const TableFuncInput& input, TableFuncOutput&) {
     // Register index in catalog
     auto indexEntry = std::make_unique<IndexCatalogEntry>(
         hashType.typeName, bindData.tableID, bindData.propertyName,
-        std::vector<property_id_t>{}, std::make_unique<HashIndexAuxInfo>());
+        std::vector<property_id_t>{}, nullptr /* auxInfo */);
     catalog->createIndex(transaction, std::move(indexEntry));
 
     // Add index to node table
