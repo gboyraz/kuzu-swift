@@ -29,9 +29,7 @@ SpillResult MemoryBuffer::setSpilledToDisk(uint64_t filePosition) {
     auto bufferSize = buffer.size();
     mm->freeBlock(pageIdx, buffer);
     // Track MM deallocation for unified budget when spilling malloc'd buffers.
-    if (pageIdx == INVALID_PAGE_IDX) {
-        mm->getBufferManager()->freeForMemoryManager(bufferSize);
-    }
+    mm->updateUsedMemoryForFreedBlock(pageIdx, buffer);
     // reinterpret_cast isn't allowed here, but we shouldn't leave the invalid pointer and
     // still want to store the size
     buffer = std::span(static_cast<uint8_t*>(nullptr), buffer.size());

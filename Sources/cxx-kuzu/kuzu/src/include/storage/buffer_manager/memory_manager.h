@@ -91,10 +91,10 @@ public:
     common::page_offset_t getPageSize() const { return pageSize; }
 
     BufferManager* getBufferManager() const { return bm; }
+    void updateUsedMemoryForFreedBlock(common::page_idx_t pageIdx, std::span<uint8_t> buffer);
 
 private:
     void freeBlock(common::page_idx_t pageIdx, std::span<uint8_t> buffer);
-    void updateUsedMemoryForFreedBlock(common::page_idx_t pageIdx, std::span<uint8_t> buffer);
     std::span<uint8_t> mallocBuffer(bool initializeToZero, uint64_t size);
 
 private:
