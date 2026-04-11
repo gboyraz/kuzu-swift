@@ -56,13 +56,20 @@ void ListAuxiliaryBuffer::resize(uint64_t numValues) {
 void ListAuxiliaryBuffer::resizeDataVector(ValueVector* dataVector) {
     const auto newSize = capacity * dataVector->getNumBytesPerValue();
     const auto copySize = size * dataVector->getNumBytesPerValue();
-    auto buffer = std::make_unique<uint8_t[]>(newSize);
-    memcpy(buffer.get(), dataVector->valueBufferPtr_, copySize);
-    dataVector->valueBuffer = std::move(buffer);
-    dataVector->mmBuffer_.reset();
-    dataVector->valueBufferPtr_ = dataVector->valueBuffer.get();
+    if (dataVector->memoryManager_) {
+        auto newBuffer = dataVector->memoryManager_->allocateBuffer(true /*initializeToZero*/, newSize);
+        memcpy(newBuffer->getData(), dataVector->valueBufferPtr_, copySize);
+        dataVector->mmBuffer_ = std::move(newBuffer);
+        dataVector->valueBuffer.reset();
+        dataVector->valueBufferPtr_ = dataVector->mmBuffer_->getData();
+    } else {
+        auto buffer = std::make_unique<uint8_t[]>(newSize);
+        memcpy(buffer.get(), dataVector->valueBufferPtr_, copySize);
+        dataVector->valueBuffer = std::move(buffer);
+        dataVector->mmBuffer_.reset();
+        dataVector->valueBufferPtr_ = dataVector->valueBuffer.get();
+    }
     dataVector->nullMask.resize(capacity);
-    // If the dataVector is a struct vector, we need to resize its field vectors.
     if (dataVector->dataType.getPhysicalType() == PhysicalTypeID::STRUCT) {
         resizeStructDataVector(dataVector);
     }

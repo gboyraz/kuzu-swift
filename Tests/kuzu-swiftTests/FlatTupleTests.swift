@@ -21,6 +21,8 @@ final class FlatTupleTests: XCTestCase {
     }
 
     override func tearDown() {
+        conn = nil
+        db = nil
         deleteTestDatabaseDirectory(path)
         super.tearDown()
     }

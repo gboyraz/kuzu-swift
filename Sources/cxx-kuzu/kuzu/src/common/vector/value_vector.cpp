@@ -370,14 +370,13 @@ uint32_t ValueVector::getDataTypeSize(const LogicalType& type) {
 void ValueVector::initializeValueBuffer() {
     const auto bufferSize =
         static_cast<uint64_t>(numBytesPerValue) * DEFAULT_VECTOR_CAPACITY;
-    // TODO(mm-budget): Once the buffer pool budget accounts for valueBuffer allocations
-    // separately (or the headroom is adjusted), switch to:
-    //   mmBuffer_ = memoryManager_->allocateBuffer(false, bufferSize);
-    //   valueBufferPtr_ = mmBuffer_->getData();
-    // For now, use untracked heap allocation to avoid competing with
-    // factorized-table / column-chunk allocations for budget headroom.
-    valueBuffer = std::make_unique<uint8_t[]>(bufferSize);
-    valueBufferPtr_ = valueBuffer.get();
+    if (memoryManager_) {
+        mmBuffer_ = memoryManager_->allocateBuffer(true /*initializeToZero*/, bufferSize);
+        valueBufferPtr_ = mmBuffer_->getData();
+    } else {
+        valueBuffer = std::make_unique<uint8_t[]>(bufferSize);
+        valueBufferPtr_ = valueBuffer.get();
+    }
     if (dataType.getPhysicalType() == PhysicalTypeID::STRUCT) {
         // For struct valueVectors, each struct_entry_t stores its current position in the
         // valueVector.

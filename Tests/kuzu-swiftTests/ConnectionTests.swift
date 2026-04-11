@@ -20,6 +20,7 @@ final class ConnectionTests: XCTestCase {
     }
 
     override func tearDown() {
+        db = nil
         deleteTestDatabaseDirectory(path)
         super.tearDown()
     }
