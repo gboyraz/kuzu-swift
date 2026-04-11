@@ -10,10 +10,10 @@
 #include "function/table/simple_table_function.h"
 #include "index/secondary_range_index.h"
 #include "main/client_context.h"
-#include "main/connection.h"
 #include "main/database.h"
 #include "processor/execution_context.h"
 #include "storage/storage_manager.h"
+#include "storage/storage_utils.h"
 #include "storage/table/rel_table.h"
 
 using namespace kuzu::common;
@@ -143,50 +143,63 @@ static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
         auto idx = std::make_unique<SecondaryRangeIndex>(
             std::move(indexInfo), std::move(storageInfoPtr));
 
-        auto* db = context->getDatabase();
-        main::Connection conn(db);
-        auto q = stringFormat("MATCH ()-[r:`{}`]->() RETURN id(r), r.`{}`",
-            tableName, indexName);
-        auto result = conn.query(q);
-        if (!result->isSuccess()) {
-            throw BinderException(
-                "Failed to rebuild rel range index: " + result->getErrorMessage());
-        }
-
+        // Direct CSR scan — avoids creating a Connection (which would deadlock).
+        auto* transaction = context->getTransaction();
         auto* mm = context->getMemoryManager();
-        auto relIDVec =
-            std::make_unique<ValueVector>(LogicalType::INTERNAL_ID(), mm);
-        auto propVec =
-            std::make_unique<ValueVector>(logicalType.copy(), mm);
-        auto st = std::make_shared<DataChunkState>();
-        relIDVec->setState(st);
-        propVec->setState(st);
-        auto insertState = idx->initInsertState(context, nullptr);
-        const uint32_t batchSz = 2048;
-        uint32_t batchIdx = 0;
-
-        while (result->hasNext()) {
-            auto tuple = result->getNext();
-            auto* relIdVal = tuple->getValue(0);
-            auto* propVal = tuple->getValue(1);
-            if (propVal->isNull()) continue;
-            relIDVec->copyFromValue(batchIdx, *relIdVal);
-            propVec->copyFromValue(batchIdx, *propVal);
-            propVec->setNull(batchIdx, false);
-            batchIdx++;
-            if (batchIdx >= batchSz) {
-                st->getSelVectorUnsafe().setToUnfiltered(batchIdx);
-                std::vector<ValueVector*> vecs{propVec.get()};
-                idx->insert(context->getTransaction(), *relIDVec, vecs,
-                    *insertState);
-                batchIdx = 0;
+        auto directions = relTable.getStorageDirections();
+        if (!directions.empty()) {
+            auto direction = directions[0];
+            auto* tableData = relTable.getDirectedTableData(direction);
+            auto numNodeGroups = tableData->getNumNodeGroups();
+            auto boundTableID = (direction == RelDataDirection::FWD)
+                                    ? relTable.getFromNodeTableID()
+                                    : relTable.getToNodeTableID();
+            auto relIDVec =
+                std::make_unique<ValueVector>(LogicalType::INTERNAL_ID(), mm);
+            auto propVec =
+                std::make_unique<ValueVector>(logicalType.copy(), mm);
+            auto outState = std::make_shared<DataChunkState>();
+            relIDVec->setState(outState);
+            propVec->setState(outState);
+            auto nodeIDVector =
+                std::make_unique<ValueVector>(LogicalType::INTERNAL_ID(), mm);
+            auto nodeIDState = std::make_shared<DataChunkState>();
+            nodeIDVector->setState(nodeIDState);
+            auto insertState = idx->initInsertState(context, nullptr);
+            for (node_group_idx_t ng = 0; ng < numNodeGroups; ng++) {
+                auto* nodeGroup = tableData->getNodeGroup(ng);
+                if (!nodeGroup) continue;
+                auto groupStartOffset =
+                    storage::StorageUtils::getStartOffsetOfNodeGroup(ng);
+                for (uint64_t batchStart = 0;
+                     batchStart < StorageConfig::NODE_GROUP_SIZE;
+                     batchStart += DEFAULT_VECTOR_CAPACITY) {
+                    auto batchSize = std::min(DEFAULT_VECTOR_CAPACITY,
+                        StorageConfig::NODE_GROUP_SIZE - batchStart);
+                    for (uint64_t i = 0; i < batchSize; i++) {
+                        nodeIDVector->setValue<nodeID_t>(i,
+                            nodeID_t{groupStartOffset + batchStart + i,
+                                boundTableID});
+                    }
+                    nodeIDState->getSelVectorUnsafe().setToUnfiltered(batchSize);
+                    auto scanState =
+                        std::make_unique<storage::RelTableScanState>(*mm,
+                            nodeIDVector.get(),
+                            std::vector<ValueVector*>{relIDVec.get(),
+                                propVec.get()},
+                            outState, false);
+                    scanState->setToTable(transaction, &relTable,
+                        {storage::REL_ID_COLUMN_ID, columnID}, {}, direction);
+                    scanState->initState(transaction, nodeGroup);
+                    while (scanState->scanNext(transaction)) {
+                        auto selSize = outState->getSelVector().getSelSize();
+                        if (selSize == 0) continue;
+                        std::vector<ValueVector*> vecs{propVec.get()};
+                        idx->insert(transaction, *relIDVec, vecs,
+                            *insertState);
+                    }
+                }
             }
-        }
-        if (batchIdx > 0) {
-            st->getSelVectorUnsafe().setToUnfiltered(batchIdx);
-            std::vector<ValueVector*> vecs{propVec.get()};
-            idx->insert(context->getTransaction(), *relIDVec, vecs,
-                *insertState);
         }
 
         relTable.addIndex(std::move(idx));
