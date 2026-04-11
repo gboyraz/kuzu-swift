@@ -682,6 +682,55 @@ final class ConnectionTests: XCTestCase {
         try conn.dropHashIndex(table: "HashIdxInt64Test", property: "age")
     }
 
+    func testHashIndexBoolProperty() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query("CREATE NODE TABLE Item(id INT64, name STRING, isUtility BOOL, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE (:Item {id: 1, name: 'Photo1', isUtility: true})")
+        _ = try conn.query("CREATE (:Item {id: 2, name: 'Photo2', isUtility: false})")
+        _ = try conn.query("CREATE (:Item {id: 3, name: 'Photo3', isUtility: true})")
+        _ = try conn.query("CREATE (:Item {id: 4, name: 'Screenshot', isUtility: false})")
+
+        // Create index on BOOL column
+        try conn.createHashIndex(table: "Item", property: "isUtility")
+
+        // Lookup true values — should find 2 (Photo1, Photo3)
+        let result = try conn.query("CALL QUERY_HASH_INDEX('Item', 'isUtility', 'true') RETURN node_id")
+        var trueCount = 0
+        while result.hasNext() {
+            let _ = try result.getNext()
+            trueCount += 1
+        }
+        result.close()
+        XCTAssertEqual(trueCount, 2)
+
+        // Lookup false values — should find 2 (Photo2, Screenshot)
+        let result2 = try conn.query("CALL QUERY_HASH_INDEX('Item', 'isUtility', 'false') RETURN node_id")
+        var falseCount = 0
+        while result2.hasNext() {
+            let _ = try result2.getNext()
+            falseCount += 1
+        }
+        result2.close()
+        XCTAssertEqual(falseCount, 2)
+
+        // createHashIndexIfNotExists should work without error
+        let created = try conn.createHashIndexIfNotExists(table: "Item", property: "isUtility")
+        XCTAssertFalse(created)  // already exists
+
+        // Drop
+        try conn.dropHashIndex(table: "Item", property: "isUtility")
+    }
+
     func testHashIndexEmptyTable() throws {
         let systemConfig = SystemConfig(
             bufferPoolSize: 256 * 1024 * 1024,

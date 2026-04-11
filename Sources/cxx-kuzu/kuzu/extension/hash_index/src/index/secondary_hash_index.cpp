@@ -195,6 +195,7 @@ template class TypedInnerSecondaryIndex<int16_t>;
 template class TypedInnerSecondaryIndex<int128_t>;
 template class TypedInnerSecondaryIndex<uint64_t>;
 template class TypedInnerSecondaryIndex<uint32_t>;
+template class TypedInnerSecondaryIndex<bool>;
 
 // ===========================================================================
 // SecondaryHashIndex – Insert / Delete / Update states (minimal)
@@ -246,6 +247,9 @@ void SecondaryHashIndex::initInnerIndex() {
         physType,
         [&](ku_string_t) {
             innerIndex = std::make_unique<TypedInnerSecondaryIndex<ku_string_t>>();
+        },
+        [&](bool) {
+            innerIndex = std::make_unique<TypedInnerSecondaryIndex<bool>>();
         },
         [&]<HashablePrimitive T>(T) {
             innerIndex = std::make_unique<TypedInnerSecondaryIndex<T>>();

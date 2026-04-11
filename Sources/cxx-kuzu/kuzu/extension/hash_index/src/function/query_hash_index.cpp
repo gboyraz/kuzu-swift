@@ -127,6 +127,11 @@ static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
                 auto val = std::stof(lookupValue);
                 index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
             },
+            [&](bool) {
+                auto val = (lookupValue == "true" || lookupValue == "True" ||
+                            lookupValue == "TRUE" || lookupValue == "1");
+                index->lookup(reinterpret_cast<const uint8_t*>(&val), resultOffsets);
+            },
             [&](auto) {
                 throw BinderException("Unsupported key type for hash index query.");
             });
