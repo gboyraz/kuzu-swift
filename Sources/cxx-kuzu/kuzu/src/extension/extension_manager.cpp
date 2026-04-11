@@ -6,6 +6,7 @@
 #include "extension/extension.h"
 #include "generated_extension_loader.h"
 #include "hash_index_extension.h"
+#include "range_index_extension.h"
 #include "storage/wal/local_wal.h"
 
 namespace kuzu {
@@ -107,6 +108,7 @@ void ExtensionManager::reconcileAfterRecovery(main::ClientContext* context) {
     auto trxContext = context->getTransactionContext();
     trxContext->beginRecoveryTransaction();
     hash_index_extension::HashIndexExtension::reconcileIndexes(context);
+    range_index_extension::RangeIndexExtension::reconcileIndexes(context);
     trxContext->commit();
 }
 
