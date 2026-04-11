@@ -1458,5 +1458,336 @@ final class StressTests: XCTestCase {
         NSLog("[Edge Test] Buffer pool: 512 MB")
         NSLog("[Edge Test] ✅ Production scale 100K+1M edges test PASSED")
     }
+
+    // MARK: - Test: Throughput Benchmark
+
+    func testThroughputBenchmark() throws {
+        let tempDir = NSTemporaryDirectory() + "kuzu_bench_" + UUID().uuidString
+        let dbPath = tempDir + "/db"
+        try FileManager.default.createDirectory(
+            atPath: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(atPath: tempDir)
+        }
+
+        let config = SystemConfig(
+            bufferPoolSize: 512 * 1024 * 1024,
+            maxNumThreads: 2
+        )
+        let db = try Database(dbPath, config)
+        let conn = try Connection(db)
+
+        // Create schema
+        _ = try conn.query(
+            "CREATE NODE TABLE BenchNode(id INT64, value DOUBLE, PRIMARY KEY(id));")
+        _ = try conn.query(
+            "CREATE REL TABLE BENCH_EDGE(FROM BenchNode TO BenchNode, weight DOUBLE);")
+
+        // ── Node throughput benchmark ──
+        let nodeStmt = try conn.prepare(
+            "CREATE (:BenchNode {id: $id, value: $value})")
+        let duration: TimeInterval = 5.0
+        var nodeCount: Int64 = 0
+        let nodeStart = Date()
+        while Date().timeIntervalSince(nodeStart) < duration {
+            _ = try conn.execute(nodeStmt, [
+                "id": nodeCount,
+                "value": Double(nodeCount) * 0.1,
+            ])
+            nodeCount += 1
+        }
+        let nodeElapsed = Date().timeIntervalSince(nodeStart)
+        let nodesPerSec = Double(nodeCount) / nodeElapsed
+        NSLog("[Benchmark] Node throughput: %.0f nodes/sec", nodesPerSec)
+
+        // Checkpoint to flush
+        _ = try conn.query("CHECKPOINT;")
+
+        // ── Edge throughput benchmark ──
+        let edgeStmt = try conn.prepare(
+            "MATCH (a:BenchNode {id: $src}), (b:BenchNode {id: $dst}) CREATE (a)-[:BENCH_EDGE {weight: $w}]->(b)"
+        )
+        var edgeCount: Int64 = 0
+        let edgeStart = Date()
+        while Date().timeIntervalSince(edgeStart) < duration {
+            let src = Int64.random(in: 0..<nodeCount)
+            var dst = Int64.random(in: 0..<nodeCount)
+            if dst == src { dst = (dst + 1) % nodeCount }
+            _ = try conn.execute(edgeStmt, [
+                "src": src,
+                "dst": dst,
+                "w": Double.random(in: 0.0...1.0),
+            ])
+            edgeCount += 1
+        }
+        let edgeElapsed = Date().timeIntervalSince(edgeStart)
+        let edgesPerSec = Double(edgeCount) / edgeElapsed
+        NSLog("[Benchmark] Edge throughput: %.0f edges/sec", edgesPerSec)
+
+        // Summary
+        NSLog("[Benchmark] === RESULTS ===")
+        NSLog("[Benchmark] Nodes: %lld inserted in 5s = %.0f nodes/sec", nodeCount, nodesPerSec)
+        NSLog("[Benchmark] Edges: %lld inserted in 5s = %.0f edges/sec", edgeCount, edgesPerSec)
+    }
+
+    // MARK: - Test: Delete Operations
+
+    func testDeleteOperations() throws {
+        let tempDir = NSTemporaryDirectory() + "kuzu_delete_ops_" + UUID().uuidString
+        let dbPath = tempDir + "/db"
+        try FileManager.default.createDirectory(
+            atPath: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(atPath: tempDir)
+            NSLog("[Delete Test] Cleaned up temp directory")
+        }
+
+        // Setup: 256MB buffer pool, 2 threads, autoCheckpoint on
+        let config = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 2,
+            autoCheckpoint: true
+        )
+        let db = try Database(dbPath, config)
+        let conn = try Connection(db)
+
+        // Create schema
+        _ = try conn.query("CREATE NODE TABLE TestNode(id INT64, value STRING, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE REL TABLE TEST_EDGE(FROM TestNode TO TestNode, weight DOUBLE)")
+        NSLog("[Delete Test] Schema created")
+
+        // Insert 1000 nodes in batches
+        let totalNodes = 1000
+        let batchSize = 100
+        for batchStart in stride(from: 0, to: totalNodes, by: batchSize) {
+            let batchEnd = min(batchStart + batchSize, totalNodes)
+            var rows = [String]()
+            for i in batchStart..<batchEnd {
+                rows.append("{id: \(i), value: 'node_\(i)'}")
+            }
+            let query = "UNWIND [\(rows.joined(separator: ","))] AS row CREATE (:TestNode {id: row.id, value: row.value});"
+            _ = try conn.query(query)
+        }
+        NSLog("[Delete Test] Inserted %d nodes", totalNodes)
+
+        // Insert 5000 edges in batches
+        let totalEdges = 5000
+        let edgeBatchSize = 200
+        for batchStart in stride(from: 0, to: totalEdges, by: edgeBatchSize) {
+            let batchEnd = min(batchStart + edgeBatchSize, totalEdges)
+            var edgeRows = [String]()
+            for i in batchStart..<batchEnd {
+                let fromId = i % totalNodes
+                let toId = (i * 7 + 13) % totalNodes
+                let weight = Double(i) / Double(totalEdges)
+                edgeRows.append("{f: \(fromId), t: \(toId), w: \(String(format: "%.4f", weight))}")
+            }
+            let query = "UNWIND [\(edgeRows.joined(separator: ","))] AS e MATCH (a:TestNode {id: e.f}), (b:TestNode {id: e.t}) CREATE (a)-[:TEST_EDGE {weight: e.w}]->(b);"
+            _ = try conn.query(query)
+        }
+        NSLog("[Delete Test] Inserted %d edges", totalEdges)
+
+        // Step 4: Test single node delete
+        do {
+            NSLog("[Delete Test] Deleting single node...")
+            _ = try conn.query("MATCH (a:TestNode {id: 999}) DETACH DELETE a")
+            NSLog("[Delete Test] Single node deleted ✓")
+        } catch {
+            NSLog("[Delete Test] Single node delete FAILED: %@", "\(error)")
+            XCTFail("Single node delete failed: \(error)")
+        }
+
+        // Step 5: Test batch node delete
+        do {
+            NSLog("[Delete Test] Deleting nodes 900-998...")
+            _ = try conn.query("MATCH (a:TestNode) WHERE a.id >= 900 AND a.id < 999 DELETE a")
+            NSLog("[Delete Test] Batch node delete ✓")
+        } catch {
+            NSLog("[Delete Test] Batch node delete FAILED: %@", "\(error)")
+            XCTFail("Batch node delete failed: \(error)")
+        }
+
+        // Step 6: Test edge delete
+        do {
+            NSLog("[Delete Test] Deleting edges from node 0...")
+            _ = try conn.query("MATCH (a:TestNode {id: 0})-[r:TEST_EDGE]->() DELETE r")
+            NSLog("[Delete Test] Edge delete ✓")
+        } catch {
+            NSLog("[Delete Test] Edge delete FAILED: %@", "\(error)")
+            XCTFail("Edge delete failed: \(error)")
+        }
+
+        // Step 7: Test bulk delete
+        do {
+            NSLog("[Delete Test] Bulk deleting 500 nodes with DETACH...")
+            _ = try conn.query("MATCH (a:TestNode) WHERE a.id >= 400 AND a.id < 900 DETACH DELETE a")
+            NSLog("[Delete Test] Bulk detach delete ✓")
+        } catch {
+            NSLog("[Delete Test] Bulk detach delete FAILED: %@", "\(error)")
+            XCTFail("Bulk detach delete failed: \(error)")
+        }
+
+        // Step 8: Verify counts after all deletions
+        let nodeResult = try conn.query("MATCH (n:TestNode) RETURN COUNT(*);")
+        let nodeTuple = try nodeResult.getNext()!
+        let remainingNodes = try nodeTuple.getValue(0) as! Int64
+        NSLog("[Delete Test] Remaining nodes: %lld", remainingNodes)
+
+        let edgeResult = try conn.query("MATCH ()-[r:TEST_EDGE]->() RETURN COUNT(r);")
+        let edgeTuple = try edgeResult.getNext()!
+        let remainingEdges = try edgeTuple.getValue(0) as! Int64
+        NSLog("[Delete Test] Remaining edges: %lld", remainingEdges)
+
+        // Step 9: Checkpoint and reopen
+        do {
+            _ = try conn.query("CALL checkpoint()")
+            NSLog("[Delete Test] Checkpoint completed")
+        } catch {
+            NSLog("[Delete Test] Checkpoint FAILED: %@", "\(error)")
+            XCTFail("Checkpoint failed: \(error)")
+        }
+
+        // Reopen DB
+        let db2 = try Database(dbPath, config)
+        let conn2 = try Connection(db2)
+
+        let nodeResult2 = try conn2.query("MATCH (n:TestNode) RETURN COUNT(*);")
+        let nodeTuple2 = try nodeResult2.getNext()!
+        let reopenNodes = try nodeTuple2.getValue(0) as! Int64
+        NSLog("[Delete Test] Reopen node count: %lld", reopenNodes)
+        XCTAssertEqual(remainingNodes, reopenNodes, "Node count mismatch after reopen")
+
+        let edgeResult2 = try conn2.query("MATCH ()-[r:TEST_EDGE]->() RETURN COUNT(r);")
+        let edgeTuple2 = try edgeResult2.getNext()!
+        let reopenEdges = try edgeTuple2.getValue(0) as! Int64
+        NSLog("[Delete Test] Reopen edge count: %lld", reopenEdges)
+        XCTAssertEqual(remainingEdges, reopenEdges, "Edge count mismatch after reopen")
+
+        NSLog("[Delete Test] Reopen verified ✓")
+    }
+
+    // MARK: - Test: Delete At Scale
+
+    func testDeleteAtScale() throws {
+        let tempDir = NSTemporaryDirectory() + "kuzu_delete_scale_" + UUID().uuidString
+        let dbPath = tempDir + "/db"
+        try FileManager.default.createDirectory(
+            atPath: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(atPath: tempDir)
+            NSLog("[Delete Scale] Cleaned up temp directory")
+        }
+
+        // 256MB buffer pool
+        let config = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 2,
+            autoCheckpoint: true
+        )
+        let db = try Database(dbPath, config)
+        let conn = try Connection(db)
+
+        // Create schema
+        _ = try conn.query("CREATE NODE TABLE TestNode(id INT64, value STRING, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE REL TABLE TEST_EDGE(FROM TestNode TO TestNode, weight DOUBLE)")
+        NSLog("[Delete Scale] Schema created")
+
+        // Insert 10000 nodes
+        let totalNodes = 10_000
+        let batchSize = 500
+        let insertStart = Date()
+        for batchStart in stride(from: 0, to: totalNodes, by: batchSize) {
+            let batchEnd = min(batchStart + batchSize, totalNodes)
+            var rows = [String]()
+            for i in batchStart..<batchEnd {
+                rows.append("{id: \(i), value: 'node_\(i)'}")
+            }
+            let query = "UNWIND [\(rows.joined(separator: ","))] AS row CREATE (:TestNode {id: row.id, value: row.value});"
+            _ = try conn.query(query)
+        }
+        let nodeInsertElapsed = Date().timeIntervalSince(insertStart)
+        NSLog("[Delete Scale] Inserted %d nodes in %.1fs", totalNodes, nodeInsertElapsed)
+
+        // Insert 50000 edges
+        let totalEdges = 50_000
+        let edgeBatchSize = 500
+        let edgeInsertStart = Date()
+        for batchStart in stride(from: 0, to: totalEdges, by: edgeBatchSize) {
+            let batchEnd = min(batchStart + edgeBatchSize, totalEdges)
+            var edgeRows = [String]()
+            for i in batchStart..<batchEnd {
+                let fromId = i % totalNodes
+                let toId = (i * 7 + 13) % totalNodes
+                let weight = Double(i) / Double(totalEdges)
+                edgeRows.append("{f: \(fromId), t: \(toId), w: \(String(format: "%.4f", weight))}")
+            }
+            let query = "UNWIND [\(edgeRows.joined(separator: ","))] AS e MATCH (a:TestNode {id: e.f}), (b:TestNode {id: e.t}) CREATE (a)-[:TEST_EDGE {weight: e.w}]->(b);"
+            _ = try conn.query(query)
+        }
+        let edgeInsertElapsed = Date().timeIntervalSince(edgeInsertStart)
+        NSLog("[Delete Scale] Inserted %d edges in %.1fs", totalEdges, edgeInsertElapsed)
+
+        // Delete half the edges: weight < 0.5
+        do {
+            let deleteStart = Date()
+            NSLog("[Delete Scale] Deleting edges with weight < 0.5...")
+            _ = try conn.query("MATCH ()-[r:TEST_EDGE]->() WHERE r.weight < 0.5 DELETE r")
+            let deleteElapsed = Date().timeIntervalSince(deleteStart)
+            NSLog("[Delete Scale] Edge delete completed in %.1fs ✓", deleteElapsed)
+        } catch {
+            NSLog("[Delete Scale] Edge delete FAILED: %@", "\(error)")
+            XCTFail("Edge delete at scale failed: \(error)")
+        }
+
+        // Delete half the nodes: id >= 5000
+        do {
+            let deleteStart = Date()
+            NSLog("[Delete Scale] Deleting nodes with id >= 5000 (DETACH DELETE)...")
+            _ = try conn.query("MATCH (a:TestNode) WHERE a.id >= 5000 DETACH DELETE a")
+            let deleteElapsed = Date().timeIntervalSince(deleteStart)
+            NSLog("[Delete Scale] Node detach delete completed in %.1fs ✓", deleteElapsed)
+        } catch {
+            NSLog("[Delete Scale] Node detach delete FAILED: %@", "\(error)")
+            XCTFail("Node detach delete at scale failed: \(error)")
+        }
+
+        // Verify counts before checkpoint
+        let nodeResult = try conn.query("MATCH (n:TestNode) RETURN COUNT(*);")
+        let nodeTuple = try nodeResult.getNext()!
+        let remainingNodes = try nodeTuple.getValue(0) as! Int64
+        NSLog("[Delete Scale] Remaining nodes after delete: %lld", remainingNodes)
+
+        let edgeResult = try conn.query("MATCH ()-[r:TEST_EDGE]->() RETURN COUNT(r);")
+        let edgeTuple = try edgeResult.getNext()!
+        let remainingEdges = try edgeTuple.getValue(0) as! Int64
+        NSLog("[Delete Scale] Remaining edges after delete: %lld", remainingEdges)
+
+        // Checkpoint
+        do {
+            _ = try conn.query("CALL checkpoint()")
+            NSLog("[Delete Scale] Checkpoint completed")
+        } catch {
+            NSLog("[Delete Scale] Checkpoint FAILED: %@", "\(error)")
+            XCTFail("Checkpoint failed: \(error)")
+        }
+
+        // Reopen and verify
+        let db2 = try Database(dbPath, config)
+        let conn2 = try Connection(db2)
+
+        let nodeResult2 = try conn2.query("MATCH (n:TestNode) RETURN COUNT(*);")
+        let nodeTuple2 = try nodeResult2.getNext()!
+        let reopenNodes = try nodeTuple2.getValue(0) as! Int64
+        NSLog("[Delete Scale] Reopen node count: %lld (expected %lld)", reopenNodes, remainingNodes)
+        XCTAssertEqual(remainingNodes, reopenNodes, "Node count mismatch after reopen")
+
+        let edgeResult2 = try conn2.query("MATCH ()-[r:TEST_EDGE]->() RETURN COUNT(r);")
+        let edgeTuple2 = try edgeResult2.getNext()!
+        let reopenEdges = try edgeTuple2.getValue(0) as! Int64
+        NSLog("[Delete Scale] Reopen edge count: %lld (expected %lld)", reopenEdges, remainingEdges)
+        XCTAssertEqual(remainingEdges, reopenEdges, "Edge count mismatch after reopen")
+
+        NSLog("[Delete Scale] Reopen verified ✓")
+    }
 }
 
