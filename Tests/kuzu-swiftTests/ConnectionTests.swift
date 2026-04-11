@@ -2066,4 +2066,77 @@ final class ConnectionTests: XCTestCase {
         try conn.dropRelIndex(table: "REL_A", property: "score")
         try conn.dropRelIndex(table: "REL_B", property: "score")
     }
+
+    // MARK: - MERGE ON CREATE SET with Index (Issue #62)
+
+    /// Regression test for GitHub issue #62: MERGE ON CREATE SET fails when a secondary
+    /// hash index exists on the property being set. ON CREATE SET is semantically an INSERT,
+    /// so the secondary index constraint check should be skipped.
+    func testMergeOnCreateSetWithIndex() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE MergePerson(id INT64, name STRING, email STRING, PRIMARY KEY(id))"
+        )
+        _ = try conn.query(
+            "CREATE (:MergePerson {id: 1, name: 'Alice', email: 'alice@test.com'})"
+        )
+
+        // Create secondary hash index on email
+        try conn.createHashIndex(table: "MergePerson", property: "email")
+
+        // MERGE with ON CREATE SET on an indexed property should NOT throw
+        _ = try conn.query(
+            "MERGE (p:MergePerson {id: 2}) ON CREATE SET p.email = 'bob@test.com', p.name = 'Bob'"
+        )
+
+        // Verify the merge created the node
+        let result = try conn.query("MATCH (p:MergePerson {id: 2}) RETURN p.email, p.name")
+        XCTAssertTrue(result.hasNext())
+        let tuple = try result.getNext()!
+        let email = try tuple.getValue(0) as! String
+        let name = try tuple.getValue(1) as! String
+        XCTAssertEqual(email, "bob@test.com")
+        XCTAssertEqual(name, "Bob")
+
+        // Verify the index was updated with the new node's email
+        let indexResult = try conn.lookupByIndex(
+            table: "MergePerson", property: "email", value: "bob@test.com"
+        )
+        XCTAssertEqual(indexResult.count, 1, "New node should be findable via index")
+
+        // ON MATCH SET on indexed property should also work (updates existing node)
+        _ = try conn.query(
+            "MERGE (p:MergePerson {id: 1}) ON MATCH SET p.email = 'alice2@test.com'"
+        )
+
+        // Verify the update
+        let result2 = try conn.query("MATCH (p:MergePerson {id: 1}) RETURN p.email")
+        XCTAssertTrue(result2.hasNext())
+        let tuple2 = try result2.getNext()!
+        let updatedEmail = try tuple2.getValue(0) as! String
+        XCTAssertEqual(updatedEmail, "alice2@test.com")
+
+        // Verify index reflects the update
+        let oldLookup = try conn.lookupByIndex(
+            table: "MergePerson", property: "email", value: "alice@test.com"
+        )
+        XCTAssertEqual(oldLookup.count, 0, "Old email should not be in index")
+
+        let newLookup = try conn.lookupByIndex(
+            table: "MergePerson", property: "email", value: "alice2@test.com"
+        )
+        XCTAssertEqual(newLookup.count, 1, "Updated email should be in index")
+
+        try conn.dropHashIndex(table: "MergePerson", property: "email")
+    }
 }
