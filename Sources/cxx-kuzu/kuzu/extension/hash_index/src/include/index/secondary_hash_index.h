@@ -21,15 +21,21 @@ namespace hash_index_extension {
 // Catalog aux info for hash index (minimal — no extra data to persist)
 // ---------------------------------------------------------------------------
 struct HashIndexAuxInfo final : catalog::IndexAuxInfo {
+    bool isUnique = false;
+
+    HashIndexAuxInfo() = default;
+    explicit HashIndexAuxInfo(bool isUnique) : isUnique{isUnique} {}
+
     std::shared_ptr<common::BufferWriter> serialize() const override {
         return std::make_shared<common::BufferWriter>(0);
     }
     std::unique_ptr<IndexAuxInfo> copy() override {
-        return std::make_unique<HashIndexAuxInfo>();
+        return std::make_unique<HashIndexAuxInfo>(isUnique);
     }
     std::string toCypher(const catalog::IndexCatalogEntry& indexEntry,
         const catalog::ToCypherInfo& /*info*/) const override {
-        return "CALL CREATE_HASH_INDEX('" + indexEntry.getIndexName() + "', '" +
+        auto funcName = isUnique ? "CREATE_UNIQUE_INDEX" : "CREATE_HASH_INDEX";
+        return std::string("CALL ") + funcName + "('" + indexEntry.getIndexName() + "', '" +
                indexEntry.getIndexName() + "');";
     }
 };
@@ -43,15 +49,19 @@ struct SecondaryHashIndexStorageInfo final : storage::IndexStorageInfo {
     std::vector<common::column_id_t> columnIDs; // for composite indexes
     std::vector<std::string> propertyNames;      // for composite indexes
     std::vector<uint8_t> serializedData; // checkpoint entry data
+    bool isUnique = false; // unique constraint flag
 
     SecondaryHashIndexStorageInfo() = default;
-    SecondaryHashIndexStorageInfo(uint64_t numEntries, common::column_id_t columnID)
-        : numEntries{numEntries}, columnID{columnID} {}
+    SecondaryHashIndexStorageInfo(uint64_t numEntries, common::column_id_t columnID,
+        bool isUnique = false)
+        : numEntries{numEntries}, columnID{columnID}, isUnique{isUnique} {}
     SecondaryHashIndexStorageInfo(uint64_t numEntries,
         std::vector<common::column_id_t> columnIDs,
-        std::vector<std::string> propertyNames)
+        std::vector<std::string> propertyNames,
+        bool isUnique = false)
         : numEntries{numEntries}, columnID{columnIDs.empty() ? common::INVALID_COLUMN_ID : columnIDs[0]},
-          columnIDs{std::move(columnIDs)}, propertyNames{std::move(propertyNames)} {}
+          columnIDs{std::move(columnIDs)}, propertyNames{std::move(propertyNames)},
+          isUnique{isUnique} {}
 
     bool isComposite() const { return columnIDs.size() > 1; }
 
@@ -155,6 +165,15 @@ public:
             storage::IndexDefinitionType::EXTENSION, load};
         return SECONDARY_HASH_TYPE;
     }
+
+    static storage::IndexType getUniqueIndexType() {
+        static const storage::IndexType SECONDARY_UNIQUE_HASH_TYPE{"UNIQUE_HASH",
+            storage::IndexConstraintType::SECONDARY_NON_UNIQUE,
+            storage::IndexDefinitionType::EXTENSION, load};
+        return SECONDARY_UNIQUE_HASH_TYPE;
+    }
+
+    bool isUnique() const;
 
     // Public lookup API for query functions.
     bool lookup(const uint8_t* keyData, std::vector<common::offset_t>& result) const override;

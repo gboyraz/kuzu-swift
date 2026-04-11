@@ -283,6 +283,123 @@ public final class Connection: @unchecked Sendable {
         return names
     }
 
+    // MARK: - Unique Index
+
+    /// Creates a unique index on a node table property.
+    /// Prevents duplicate values for the property across all rows.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the property to index with uniqueness constraint.
+    /// - Throws: KuzuError if index creation fails or duplicate values already exist.
+    public func createUniqueIndex(table: String, property: String) throws {
+        let result = try query("CALL CREATE_UNIQUE_INDEX('\(table)', '\(property)')")
+        result.close()
+    }
+
+    /// Creates a unique index if one doesn't already exist.
+    /// Safe to call on every app launch — idempotent.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the property to index with uniqueness constraint.
+    /// - Returns: `true` if the index was created, `false` if it already existed.
+    /// - Throws: KuzuError if index creation fails for reasons other than the index already existing.
+    @discardableResult
+    public func createUniqueIndexIfNotExists(table: String, property: String) throws -> Bool {
+        do {
+            try createUniqueIndex(table: table, property: property)
+            return true
+        } catch {
+            let msg = "\(error)"
+            if msg.contains("already exists") {
+                return false
+            }
+            throw error
+        }
+    }
+
+    /// Looks up a single node by a unique-indexed property value.
+    /// Returns exactly 0 or 1 result since the index enforces uniqueness.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the unique-indexed property.
+    ///   - value: The string value to look up.
+    /// - Returns: The matching internal ID, or nil if not found.
+    /// - Throws: KuzuError if the lookup fails.
+    public func lookupUnique(table: String, property: String, value: String) throws -> KuzuInternalId? {
+        let result = try query("CALL QUERY_UNIQUE_INDEX('\(table)', '\(property)', '\(value)') RETURN node_id")
+        defer { result.close() }
+        if result.hasNext() {
+            if let tuple = try result.getNext() {
+                let val = try tuple.getValue(0)
+                if let id = val as? KuzuInternalId {
+                    return id
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Looks up a single node by a unique-indexed property value (Int64).
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the unique-indexed property.
+    ///   - value: The integer value to look up.
+    /// - Returns: The matching internal ID, or nil if not found.
+    /// - Throws: KuzuError if the lookup fails.
+    public func lookupUnique(table: String, property: String, value: Int64) throws -> KuzuInternalId? {
+        let result = try query("CALL QUERY_UNIQUE_INDEX('\(table)', '\(property)', '\(value)') RETURN node_id")
+        defer { result.close() }
+        if result.hasNext() {
+            if let tuple = try result.getNext() {
+                let val = try tuple.getValue(0)
+                if let id = val as? KuzuInternalId {
+                    return id
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Drops a unique index on a node table property.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the unique-indexed property.
+    /// - Throws: KuzuError if dropping the index fails.
+    public func dropUniqueIndex(table: String, property: String) throws {
+        let result = try query("CALL DROP_UNIQUE_INDEX('\(table)', '\(property)')")
+        result.close()
+    }
+
+    /// Checks whether a unique index exists on the given table property.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the property to check.
+    /// - Returns: `true` if a unique index exists on the property, `false` otherwise.
+    /// - Throws: KuzuError if the check fails.
+    public func hasUniqueIndex(table: String, property: String) throws -> Bool {
+        let indexes = try listUniqueIndexes(table: table)
+        return indexes.contains(property)
+    }
+
+    /// Lists all unique indexes on a table. Returns property names that have unique indexes.
+    /// - Parameter table: The name of the node table.
+    /// - Returns: An array of property names that have unique indexes.
+    /// - Throws: KuzuError if the query fails.
+    public func listUniqueIndexes(table: String) throws -> [String] {
+        let result = try query("CALL LIST_UNIQUE_INDEXES('\(table)') RETURN property_name")
+        defer { result.close() }
+        var names: [String] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                let val = try tuple.getValue(0)
+                if let name = val as? String {
+                    names.append(name)
+                }
+            }
+        }
+        return names
+    }
+
     // MARK: - Composite Hash Index
 
     /// Creates a composite hash index on multiple properties.
