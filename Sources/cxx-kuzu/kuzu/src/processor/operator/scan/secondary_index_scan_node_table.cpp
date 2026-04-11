@@ -81,30 +81,40 @@ bool SecondaryIndexScanNodeTable::getNextTuplesInternal(ExecutionContext* contex
         lookupDone = true;
     }
 
-    // Emit one row at a time from the matched offsets
+    // All offsets consumed?
     if (currentOffsetIdx >= matchedOffsets.size()) {
         return false;
     }
 
     auto& tableInfo = tableInfos[currentTableIdx];
     auto& table = tableInfo.table->cast<NodeTable>();
-    auto offset = matchedOffsets[currentOffsetIdx];
-    currentOffsetIdx++;
+    const auto tableID = table.getTableID();
 
-    auto nodeID = nodeID_t{offset, table.getTableID()};
-    // Ensure selVector is size 1 for lookup
-    scanState->nodeIDVector->state->getSelVectorUnsafe().setToUnfiltered(1);
-    scanState->nodeIDVector->setValue<nodeID_t>(0, nodeID);
+    // Batch emit: fill up to DEFAULT_VECTOR_CAPACITY rows
+    const auto remaining = static_cast<idx_t>(matchedOffsets.size() - currentOffsetIdx);
+    const auto numToEmit = std::min(remaining, static_cast<idx_t>(DEFAULT_VECTOR_CAPACITY));
 
-    // Look up properties
-    tableInfo.initScanState(*scanState, outVectors, context->clientContext);
-    table.initScanState(transaction, *scanState, nodeID.tableID, offset);
-    auto succeeded = table.lookup(transaction, *scanState);
-    tableInfo.castColumns();
-    if (succeeded) {
-        metrics->numOutputTuple.incrementByOne();
+    // Set selection vector to cover the batch
+    auto& selVector = scanState->nodeIDVector->state->getSelVectorUnsafe();
+    selVector.setToUnfiltered(numToEmit);
+
+    // Fill nodeIDVector with all nodeIDs for this batch
+    for (idx_t i = 0; i < numToEmit; i++) {
+        auto offset = matchedOffsets[currentOffsetIdx + i];
+        scanState->nodeIDVector->setValue<nodeID_t>(i, nodeID_t{offset, tableID});
     }
-    return succeeded;
+
+    // Initialize scan state columns/vectors, then batch lookup
+    tableInfo.initScanState(*scanState, outVectors, context->clientContext);
+    table.lookupMultiple(transaction, *scanState);
+    tableInfo.castColumns();
+
+    currentOffsetIdx += numToEmit;
+
+    // Set output state to unflat for downstream operators
+    scanState->outState->setToUnflat();
+    metrics->numOutputTuple.increase(numToEmit);
+    return true;
 }
 
 } // namespace processor
