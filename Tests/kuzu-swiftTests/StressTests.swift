@@ -1532,7 +1532,7 @@ final class StressTests: XCTestCase {
         // Step 5: Test batch node delete
         do {
             NSLog("[Delete Test] Deleting nodes 900-998...")
-            _ = try conn.query("MATCH (a:TestNode) WHERE a.id >= 900 AND a.id < 999 DELETE a")
+            _ = try conn.query("MATCH (a:TestNode) WHERE a.id >= 900 AND a.id < 999 DETACH DELETE a")
             NSLog("[Delete Test] Batch node delete ✓")
         } catch {
             NSLog("[Delete Test] Batch node delete FAILED: %@", "\(error)")
