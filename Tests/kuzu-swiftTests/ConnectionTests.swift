@@ -196,10 +196,7 @@ final class ConnectionTests: XCTestCase {
     }
 
     /// Regression test for GitHub issue #25 (second comment): interleaved PreparedStatements
-    /// from the same Connection cause double-free during ARC batch deallocation.
-    /// The crash happens when multiple DIFFERENT PreparedStatements produce QueryResults
-    /// in a loop — ARC defers cleanup until scope exit, and the C++ results share
-    /// internal Connection state (catalog snapshots, memory pools).
+    /// from the same Connection. Each QueryResult is independent and owns its data.
     func testInterleavedPreparedStatementsNoDoubleFree() throws {
         let conn = try Connection(db)
 
@@ -288,8 +285,7 @@ final class ConnectionTests: XCTestCase {
         NSLog("testInterleavedPreparedStatementsNoDoubleFree passed — no crash")
     }
 
-    /// Tests that concurrent query/execute calls on the same Connection do not crash
-    /// due to races on lastQueryResult (thread-safety of the NSLock guard).
+    /// Tests that concurrent query/execute calls on the same Connection do not crash.
     func testConcurrentConnectionAccess() throws {
         let conn = try Connection(db)
 

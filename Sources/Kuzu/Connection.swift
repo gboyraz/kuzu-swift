@@ -6,19 +6,11 @@
 //  This code is licensed under MIT license (see LICENSE for details)
 
 @_implementationOnly import cxx_kuzu
-import Foundation
 
 /// Represents a connection to a Kuzu database.
 public final class Connection: @unchecked Sendable {
     internal var cConnection: kuzu_connection
     internal var database: Database
-    /// Protects access to `lastQueryResult` across concurrent query/execute calls.
-    private let resultLock = NSLock()
-    /// Tracks the most recent QueryResult produced by this connection.
-    /// Before producing a new result, the previous one is eagerly destroyed
-    /// to prevent double-free crashes caused by shared C++ internal state
-    /// (catalog snapshots, memory pools) between results from the same connection.
-    internal weak var lastQueryResult: QueryResult?
 
     /// Opens a connection to the specified database.
     /// - Parameter database: The database to connect to
@@ -43,11 +35,6 @@ public final class Connection: @unchecked Sendable {
     /// - Returns: A QueryResult containing the results of the query
     /// - Throws: KuzuError if query execution fails
     public func query(_ cypher: String) throws -> QueryResult {
-        // Eagerly destroy previous result to prevent double-free from shared C++ state
-        resultLock.lock()
-        lastQueryResult?.close()
-        resultLock.unlock()
-
         var cQueryResult = kuzu_query_result()
         kuzu_connection_query(&cConnection, cypher, &cQueryResult)
         if !kuzu_query_result_is_success(&cQueryResult) {
@@ -66,11 +53,7 @@ public final class Connection: @unchecked Sendable {
                 throw KuzuError.queryExecutionFailed(errorMessage)
             }
         }
-        let queryResult = QueryResult(self, cQueryResult)
-        resultLock.lock()
-        lastQueryResult = queryResult
-        resultLock.unlock()
-        return queryResult
+        return QueryResult(self, cQueryResult)
     }
 
     /// Returns a prepared statement for the specified query string.
@@ -111,14 +94,6 @@ public final class Connection: @unchecked Sendable {
         _ preparedStatement: PreparedStatement,
         _ parameters: [String: T?]
     ) throws -> QueryResult {
-        // Eagerly destroy previous results to prevent double-free from shared C++ state.
-        // Must destroy both: (1) the connection-level last result (covers cross-statement
-        // sharing) and (2) the statement-level active result (covers same-statement reuse).
-        resultLock.lock()
-        lastQueryResult?.close()
-        resultLock.unlock()
-        preparedStatement.activeQueryResult?.close()
-
         var cQueryResult = kuzu_query_result()
         for (key, value) in parameters {
             let cValue = try swiftValueToKuzuValue(value)
@@ -157,12 +132,7 @@ public final class Connection: @unchecked Sendable {
                 throw KuzuError.queryExecutionFailed(errorMessage)
             }
         }
-        let queryResult = QueryResult(self, cQueryResult)
-        preparedStatement.activeQueryResult = queryResult
-        resultLock.lock()
-        lastQueryResult = queryResult
-        resultLock.unlock()
-        return queryResult
+        return QueryResult(self, cQueryResult)
     }
 
     /// Sets the maximum number of threads that can be used for executing a query in parallel.
