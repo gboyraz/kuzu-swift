@@ -186,7 +186,10 @@ static void initRangeIndexEntries(main::ClientContext* context) {
                     optionalIndex.value().get().load(context, storageManager);
                 }
             } else {
-                rebuildRelRangeIndex(context, storageManager, indexEntry);
+                // During recovery (extension load / WAL reconcile), skip the CSR
+                // scan to avoid deadlock.  The in-memory index will be rebuilt
+                // lazily on the first QUERY_REL_RANGE_INDEX call, when the DB is
+                // fully open and a Connection can be safely created.
             }
         } else {
             auto& nodeTable =

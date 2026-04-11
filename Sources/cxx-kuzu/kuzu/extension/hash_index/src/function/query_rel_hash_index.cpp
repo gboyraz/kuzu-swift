@@ -10,6 +10,8 @@
 #include "function/table/simple_table_function.h"
 #include "index/secondary_hash_index.h"
 #include "main/client_context.h"
+#include "main/connection.h"
+#include "main/database.h"
 #include "processor/execution_context.h"
 #include "storage/storage_manager.h"
 #include "storage/table/rel_table.h"
@@ -61,6 +63,76 @@ static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
     auto& relTable =
         storageManager->getTable(innerOid)->cast<storage::RelTable>();
     auto indexOpt = relTable.getIndex(indexName);
+
+    // Lazy rebuild: after DB reopen the catalog entry survives but the
+    // in-memory index on RelTable does not.  Rebuild now using Cypher
+    // (safe because the DB is fully open at query time).
+    if (!indexOpt.has_value() && tableEntry->containsProperty(indexName)) {
+        auto columnID = tableEntry->getColumnID(indexName);
+        auto& propDef = tableEntry->getProperty(indexName);
+        auto keyType = propDef.getType().getPhysicalType();
+        auto logicalType = propDef.getType().copy();
+
+        auto hashType = SecondaryHashIndex::getIndexType();
+        storage::IndexInfo indexInfo{indexName, hashType.typeName, relGroupID,
+            {columnID}, {keyType},
+            hashType.constraintType == storage::IndexConstraintType::PRIMARY,
+            hashType.definitionType == storage::IndexDefinitionType::BUILTIN};
+        auto storageInfoPtr =
+            std::make_unique<SecondaryHashIndexStorageInfo>(0, columnID);
+        auto idx = std::make_unique<SecondaryHashIndex>(
+            std::move(indexInfo), std::move(storageInfoPtr));
+
+        auto* db = context->getDatabase();
+        main::Connection conn(db);
+        auto q = stringFormat("MATCH ()-[r:`{}`]->() RETURN id(r), r.`{}`",
+            tableName, indexName);
+        auto result = conn.query(q);
+        if (!result->isSuccess()) {
+            throw BinderException(
+                "Failed to rebuild rel index: " + result->getErrorMessage());
+        }
+
+        auto* mm = context->getMemoryManager();
+        auto relIDVec =
+            std::make_unique<ValueVector>(LogicalType::INTERNAL_ID(), mm);
+        auto propVec =
+            std::make_unique<ValueVector>(logicalType.copy(), mm);
+        auto st = std::make_shared<DataChunkState>();
+        relIDVec->setState(st);
+        propVec->setState(st);
+        auto insertState = idx->initInsertState(context, nullptr);
+        const uint32_t batchSz = 2048;
+        uint32_t batchIdx = 0;
+
+        while (result->hasNext()) {
+            auto tuple = result->getNext();
+            auto* relIdVal = tuple->getValue(0);
+            auto* propVal = tuple->getValue(1);
+            if (propVal->isNull()) continue;
+            relIDVec->copyFromValue(batchIdx, *relIdVal);
+            propVec->copyFromValue(batchIdx, *propVal);
+            propVec->setNull(batchIdx, false);
+            batchIdx++;
+            if (batchIdx >= batchSz) {
+                st->getSelVectorUnsafe().setToUnfiltered(batchIdx);
+                std::vector<ValueVector*> vecs{propVec.get()};
+                idx->insert(context->getTransaction(), *relIDVec, vecs,
+                    *insertState);
+                batchIdx = 0;
+            }
+        }
+        if (batchIdx > 0) {
+            st->getSelVectorUnsafe().setToUnfiltered(batchIdx);
+            std::vector<ValueVector*> vecs{propVec.get()};
+            idx->insert(context->getTransaction(), *relIDVec, vecs,
+                *insertState);
+        }
+
+        relTable.addIndex(std::move(idx));
+        indexOpt = relTable.getIndex(indexName);
+    }
+
     if (!indexOpt.has_value()) {
         throw BinderException(
             stringFormat("Index {} not found on table {}.", indexName, tableName));
