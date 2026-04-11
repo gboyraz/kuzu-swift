@@ -25,6 +25,26 @@ struct ListHashIndexesFunction final {
     static function::function_set getFunctionSet();
 };
 
+struct CreateUniqueIndexFunction final {
+    static constexpr const char* name = "CREATE_UNIQUE_INDEX";
+    static function::function_set getFunctionSet();
+};
+
+struct DropUniqueIndexFunction final {
+    static constexpr const char* name = "DROP_UNIQUE_INDEX";
+    static function::function_set getFunctionSet();
+};
+
+struct QueryUniqueIndexFunction final {
+    static constexpr const char* name = "QUERY_UNIQUE_INDEX";
+    static function::function_set getFunctionSet();
+};
+
+struct ListUniqueIndexesFunction final {
+    static constexpr const char* name = "LIST_UNIQUE_INDEXES";
+    static function::function_set getFunctionSet();
+};
+
 } // namespace hash_index_extension
 } // namespace kuzu
 

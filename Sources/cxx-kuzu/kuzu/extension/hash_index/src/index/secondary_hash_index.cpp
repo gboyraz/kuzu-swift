@@ -2,8 +2,10 @@
 
 #include <algorithm>
 
+#include "common/exception/runtime.h"
 #include "common/serializer/deserializer.h"
 #include "common/serializer/serializer.h"
+#include "common/string_format.h"
 #include "main/client_context.h"
 
 namespace kuzu {
@@ -37,6 +39,8 @@ std::shared_ptr<BufferWriter> SecondaryHashIndexStorageInfo::serialize() const {
     for (auto& pn : propertyNames) {
         serializer.write<std::string>(pn);
     }
+    // Write unique flag
+    serializer.write<uint8_t>(isUnique ? 1 : 0);
     return bufferWriter;
 }
 
@@ -71,6 +75,12 @@ std::unique_ptr<IndexStorageInfo> SecondaryHashIndexStorageInfo::deserialize(
         for (uint64_t i = 0; i < numPropNames; i++) {
             deSer.deserializeValue<std::string>(si->propertyNames[i]);
         }
+    }
+    // Read unique flag if present
+    if (!deSer.finished()) {
+        uint8_t uniqueFlag = 0;
+        deSer.deserializeValue<uint8_t>(uniqueFlag);
+        si->isUnique = (uniqueFlag != 0);
     }
     return si;
 }
@@ -277,6 +287,7 @@ void SecondaryHashIndex::insert(transaction::Transaction* /*transaction*/,
     KU_ASSERT(!indexVectors.empty());
     auto& si = storageInfo->cast<SecondaryHashIndexStorageInfo>();
     const bool composite = si.isComposite();
+    const bool unique = si.isUnique;
     std::lock_guard<std::mutex> lock(mtx);
     for (auto i = 0u; i < nodeIDVector.state->getSelSize(); i++) {
         auto pos = nodeIDVector.state->getSelVector()[i];
@@ -299,11 +310,30 @@ void SecondaryHashIndex::insert(transaction::Transaction* /*transaction*/,
             }
             auto compositeKey = buildCompositeKey(parts);
             ku_string_t kuStr(compositeKey.data(), compositeKey.size());
+            if (unique) {
+                std::vector<offset_t> existing;
+                innerIndex->lookupOffsets(reinterpret_cast<const uint8_t*>(&kuStr), existing);
+                if (!existing.empty()) {
+                    throw RuntimeException(stringFormat(
+                        "Unique constraint violation: duplicate value '{}' for index '{}'",
+                        compositeKey, indexInfo.name));
+                }
+            }
             innerIndex->insertEntry(reinterpret_cast<const uint8_t*>(&kuStr), nodeOffset);
         } else {
             auto* propVector = indexVectors[0];
             if (propVector->isNull(pos)) continue;
             auto* keyData = propVector->getData() + propVector->getNumBytesPerValue() * pos;
+            if (unique) {
+                std::vector<offset_t> existing;
+                innerIndex->lookupOffsets(keyData, existing);
+                if (!existing.empty()) {
+                    auto valStr = vectorValueToString(propVector, pos);
+                    throw RuntimeException(stringFormat(
+                        "Unique constraint violation: duplicate value '{}' for index '{}'",
+                        valStr, indexInfo.name));
+                }
+            }
             innerIndex->insertEntry(keyData, nodeOffset);
         }
     }
@@ -320,17 +350,16 @@ void SecondaryHashIndex::update(transaction::Transaction* /*transaction*/,
     UpdateState& updateState) {
     auto& si = storageInfo->cast<SecondaryHashIndexStorageInfo>();
     auto& updState = updateState.cast<SecondaryUpdateState>();
+    const bool unique = si.isUnique;
     std::lock_guard<std::mutex> lock(mtx);
     for (auto i = 0u; i < nodeIDVector.state->getSelSize(); i++) {
         auto pos = nodeIDVector.state->getSelVector()[i];
         auto nodeOffset = nodeIDVector.getValue<internalID_t>(pos).offset;
         if (si.isComposite()) {
-            // For composite: get old composite key, split, replace updated component, rebuild
             auto oldKeyStr = innerIndex->getKeyStringForOffset(nodeOffset);
             innerIndex->deleteByOffset(nodeOffset);
             if (!oldKeyStr.empty() && !propertyVector.isNull(pos)) {
                 auto parts = splitCompositeKey(oldKeyStr);
-                // Find which position in the composite the updated column occupies
                 auto updatedColumnID = updState.columnID;
                 for (size_t ci = 0; ci < si.columnIDs.size(); ci++) {
                     if (si.columnIDs[ci] == updatedColumnID) {
@@ -340,13 +369,35 @@ void SecondaryHashIndex::update(transaction::Transaction* /*transaction*/,
                 }
                 auto newKey = buildCompositeKey(parts);
                 ku_string_t kuStr(newKey.data(), newKey.size());
+                if (unique) {
+                    std::vector<offset_t> existing;
+                    innerIndex->lookupOffsets(reinterpret_cast<const uint8_t*>(&kuStr), existing);
+                    for (auto existingOffset : existing) {
+                        if (existingOffset != nodeOffset) {
+                            throw RuntimeException(stringFormat(
+                                "Unique constraint violation: duplicate value '{}' for index '{}'",
+                                newKey, indexInfo.name));
+                        }
+                    }
+                }
                 innerIndex->insertEntry(reinterpret_cast<const uint8_t*>(&kuStr), nodeOffset);
             }
         } else {
-            // Single property update (original behavior)
             innerIndex->deleteByOffset(nodeOffset);
             if (!propertyVector.isNull(pos)) {
                 auto* keyData = propertyVector.getData() + propertyVector.getNumBytesPerValue() * pos;
+                if (unique) {
+                    std::vector<offset_t> existing;
+                    innerIndex->lookupOffsets(keyData, existing);
+                    for (auto existingOffset : existing) {
+                        if (existingOffset != nodeOffset) {
+                            auto valStr = vectorValueToString(&propertyVector, pos);
+                            throw RuntimeException(stringFormat(
+                                "Unique constraint violation: duplicate value '{}' for index '{}'",
+                                valStr, indexInfo.name));
+                        }
+                    }
+                }
                 innerIndex->insertEntry(keyData, nodeOffset);
             }
         }
@@ -425,6 +476,11 @@ std::vector<std::string> SecondaryHashIndex::splitCompositeKey(const std::string
 bool SecondaryHashIndex::isComposite() const {
     auto& si = storageInfo->cast<SecondaryHashIndexStorageInfo>();
     return si.isComposite();
+}
+
+bool SecondaryHashIndex::isUnique() const {
+    auto& si = storageInfo->cast<SecondaryHashIndexStorageInfo>();
+    return si.isUnique;
 }
 
 } // namespace hash_index_extension

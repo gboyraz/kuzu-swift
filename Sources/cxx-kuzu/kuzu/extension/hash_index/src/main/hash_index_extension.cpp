@@ -36,17 +36,17 @@ static std::vector<std::string> splitProperties(const std::string& props) {
 // This is used during WAL recovery when the catalog knows about the index but
 // NodeTable has no IndexHolder (because WAL replay only restores catalog entries).
 static void rebuildIndex(main::ClientContext* context, storage::StorageManager* storageManager,
-    catalog::IndexCatalogEntry* indexEntry) {
+    catalog::IndexCatalogEntry* indexEntry, bool isUniqueIdx = false) {
     auto* catalog = context->getCatalog();
     auto* transaction = context->getTransaction();
     auto tableID = indexEntry->getTableID();
     auto& nodeTable = storageManager->getTable(tableID)->cast<storage::NodeTable>();
 
-    // Look up the table catalog entry to resolve property names → column IDs & types.
     auto* tableEntry = catalog->getTableCatalogEntry(transaction, tableID);
     auto indexName = indexEntry->getIndexName();
     auto propNames = splitProperties(indexName);
-    auto hashType = SecondaryHashIndex::getIndexType();
+    auto hashType = isUniqueIdx ? SecondaryHashIndex::getUniqueIndexType()
+                                : SecondaryHashIndex::getIndexType();
 
     if (propNames.size() > 1) {
         // === Composite index ===
@@ -64,7 +64,7 @@ static void rebuildIndex(main::ClientContext* context, storage::StorageManager* 
             hashType.definitionType == storage::IndexDefinitionType::BUILTIN};
 
         auto storageInfoPtr = std::make_unique<SecondaryHashIndexStorageInfo>(
-            0, colIDs, propNames);
+            0, colIDs, propNames, isUniqueIdx);
         auto index = std::make_unique<SecondaryHashIndex>(
             std::move(indexInfo), std::move(storageInfoPtr));
 
@@ -112,7 +112,7 @@ static void rebuildIndex(main::ClientContext* context, storage::StorageManager* 
             hashType.constraintType == storage::IndexConstraintType::PRIMARY,
             hashType.definitionType == storage::IndexDefinitionType::BUILTIN};
 
-        auto storageInfoPtr = std::make_unique<SecondaryHashIndexStorageInfo>(0, columnID);
+        auto storageInfoPtr = std::make_unique<SecondaryHashIndexStorageInfo>(0, columnID, isUniqueIdx);
         auto index = std::make_unique<SecondaryHashIndex>(
             std::move(indexInfo), std::move(storageInfoPtr));
 
@@ -163,24 +163,23 @@ static void initHashIndexEntries(main::ClientContext* context) {
         return;
     }
     for (auto& indexEntry : catalog->getIndexEntries(transaction)) {
-        if (indexEntry->getIndexType() != "HASH") {
+        auto indexType = indexEntry->getIndexType();
+        if (indexType != "HASH" && indexType != "UNIQUE_HASH") {
             continue;
         }
+        bool isUniqueIdx = (indexType == "UNIQUE_HASH");
         if (!indexEntry->isLoaded()) {
-            // Set auxInfo so the catalog entry is marked as loaded.
-            indexEntry->setAuxInfo(std::make_unique<HashIndexAuxInfo>());
+            indexEntry->setAuxInfo(std::make_unique<HashIndexAuxInfo>(isUniqueIdx));
         }
         auto& nodeTable =
             storageManager->getTable(indexEntry->getTableID())->cast<storage::NodeTable>();
         auto optionalIndex = nodeTable.getIndexHolder(indexEntry->getIndexName());
         if (optionalIndex.has_value()) {
-            // IndexHolder exists but may not be loaded yet.
             if (!optionalIndex.value().get().isLoaded()) {
                 optionalIndex.value().get().load(context, storageManager);
             }
         } else {
-            // No IndexHolder in NodeTable — rebuild from scratch (WAL recovery case).
-            rebuildIndex(context, storageManager, indexEntry);
+            rebuildIndex(context, storageManager, indexEntry, isUniqueIdx);
         }
     }
 }
@@ -191,7 +190,12 @@ void HashIndexExtension::load(main::ClientContext* context) {
     extension::ExtensionUtils::addStandaloneTableFunc<DropHashIndexFunction>(db);
     extension::ExtensionUtils::addTableFunc<QueryHashIndexFunction>(db);
     extension::ExtensionUtils::addTableFunc<ListHashIndexesFunction>(db);
+    extension::ExtensionUtils::addStandaloneTableFunc<CreateUniqueIndexFunction>(db);
+    extension::ExtensionUtils::addStandaloneTableFunc<DropUniqueIndexFunction>(db);
+    extension::ExtensionUtils::addTableFunc<QueryUniqueIndexFunction>(db);
+    extension::ExtensionUtils::addTableFunc<ListUniqueIndexesFunction>(db);
     extension::ExtensionUtils::registerIndexType(db, SecondaryHashIndex::getIndexType());
+    extension::ExtensionUtils::registerIndexType(db, SecondaryHashIndex::getUniqueIndexType());
     initHashIndexEntries(context);
 }
 

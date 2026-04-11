@@ -1730,4 +1730,162 @@ final class ConnectionTests: XCTestCase {
         XCTAssertEqual(names, ["Charlie"]) // age 35
         try conn.dropRangeIndex(table: "RangeTest", property: "age")
     }
+
+    // MARK: - Unique Index Tests
+
+    func testUniqueIndexBasic() throws {
+        let memDb = try Database(":memory:")
+        let conn = try Connection(memDb)
+        _ = try conn.query("CREATE NODE TABLE UniqueTest(id INT64, email STRING, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE (:UniqueTest {id:1, email:'a@test.com'})")
+        _ = try conn.query("CREATE (:UniqueTest {id:2, email:'b@test.com'})")
+        try conn.createUniqueIndex(table: "UniqueTest", property: "email")
+        let r = try conn.lookupUnique(table: "UniqueTest", property: "email", value: "a@test.com")
+        XCTAssertNotNil(r)
+        let empty = try conn.lookupUnique(table: "UniqueTest", property: "email", value: "nobody@test.com")
+        XCTAssertNil(empty)
+        try conn.dropUniqueIndex(table: "UniqueTest", property: "email")
+    }
+
+    func testUniqueIndexDuplicateInsertFails() throws {
+        let memDb = try Database(":memory:")
+        let conn = try Connection(memDb)
+        _ = try conn.query("CREATE NODE TABLE UniqueInsert(id INT64, email STRING, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE (:UniqueInsert {id:1, email:'dup@test.com'})")
+        try conn.createUniqueIndex(table: "UniqueInsert", property: "email")
+        // Inserting a duplicate should fail
+        XCTAssertThrowsError(try conn.query("CREATE (:UniqueInsert {id:2, email:'dup@test.com'})")) { error in
+            XCTAssertTrue("\(error)".contains("Unique constraint violation"))
+        }
+        try conn.dropUniqueIndex(table: "UniqueInsert", property: "email")
+    }
+
+    func testUniqueIndexDuplicateUpdateFails() throws {
+        let memDb = try Database(":memory:")
+        let conn = try Connection(memDb)
+        _ = try conn.query("CREATE NODE TABLE UniqueUpdate(id INT64, email STRING, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE (:UniqueUpdate {id:1, email:'first@test.com'})")
+        _ = try conn.query("CREATE (:UniqueUpdate {id:2, email:'second@test.com'})")
+        try conn.createUniqueIndex(table: "UniqueUpdate", property: "email")
+        // Updating to a value that already exists on another row should fail
+        XCTAssertThrowsError(try conn.query("MATCH (p:UniqueUpdate) WHERE p.id = 2 SET p.email = 'first@test.com'")) { error in
+            XCTAssertTrue("\(error)".contains("Unique constraint violation"))
+        }
+        try conn.dropUniqueIndex(table: "UniqueUpdate", property: "email")
+    }
+
+    func testUniqueIndexUpdateSameRowOk() throws {
+        let memDb = try Database(":memory:")
+        let conn = try Connection(memDb)
+        _ = try conn.query("CREATE NODE TABLE UniqueSame(id INT64, email STRING, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE (:UniqueSame {id:1, email:'same@test.com'})")
+        try conn.createUniqueIndex(table: "UniqueSame", property: "email")
+        // Updating a row to its own current value should succeed
+        _ = try conn.query("MATCH (p:UniqueSame) WHERE p.id = 1 SET p.email = 'same@test.com'")
+        let r = try conn.lookupUnique(table: "UniqueSame", property: "email", value: "same@test.com")
+        XCTAssertNotNil(r)
+        try conn.dropUniqueIndex(table: "UniqueSame", property: "email")
+    }
+
+    func testUniqueIndexDeleteReinsert() throws {
+        let memDb = try Database(":memory:")
+        let conn = try Connection(memDb)
+        _ = try conn.query("CREATE NODE TABLE UniqueReins(id INT64, email STRING, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE (:UniqueReins {id:1, email:'reuse@test.com'})")
+        try conn.createUniqueIndex(table: "UniqueReins", property: "email")
+        // Delete and re-insert same value
+        _ = try conn.query("MATCH (p:UniqueReins) WHERE p.id = 1 DELETE p")
+        _ = try conn.query("CREATE (:UniqueReins {id:2, email:'reuse@test.com'})")
+        let r = try conn.lookupUnique(table: "UniqueReins", property: "email", value: "reuse@test.com")
+        XCTAssertNotNil(r)
+        try conn.dropUniqueIndex(table: "UniqueReins", property: "email")
+    }
+
+    func testUniqueIndexNullSkip() throws {
+        let memDb = try Database(":memory:")
+        let conn = try Connection(memDb)
+        _ = try conn.query("CREATE NODE TABLE UniqueNull(id INT64, email STRING, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE (:UniqueNull {id:1})")
+        _ = try conn.query("CREATE (:UniqueNull {id:2})")
+        // Both have null email — should not conflict
+        try conn.createUniqueIndex(table: "UniqueNull", property: "email")
+        let r = try conn.lookupUnique(table: "UniqueNull", property: "email", value: "anything")
+        XCTAssertNil(r)
+        try conn.dropUniqueIndex(table: "UniqueNull", property: "email")
+    }
+
+    func testUniqueIndexSurvivesReopen() throws {
+        let dbPath = NSTemporaryDirectory() + "kuzu_unique_reopen_" + UUID().uuidString
+        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+        let config = SystemConfig(bufferPoolSize: 256 * 1024 * 1024, maxNumThreads: 1, autoCheckpoint: true)
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            _ = try conn.query("CREATE NODE TABLE UniqueReopen(id INT64, email STRING, PRIMARY KEY(id))")
+            _ = try conn.query("CREATE (:UniqueReopen {id:1, email:'persist@test.com'})")
+            try conn.createUniqueIndex(table: "UniqueReopen", property: "email")
+            let r = try conn.lookupUnique(table: "UniqueReopen", property: "email", value: "persist@test.com")
+            XCTAssertNotNil(r)
+        }
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            let has = try conn.hasUniqueIndex(table: "UniqueReopen", property: "email")
+            XCTAssertTrue(has)
+            let r = try conn.lookupUnique(table: "UniqueReopen", property: "email", value: "persist@test.com")
+            XCTAssertNotNil(r)
+            // Duplicate should still be rejected after reopen
+            XCTAssertThrowsError(try conn.query("CREATE (:UniqueReopen {id:2, email:'persist@test.com'})")) { error in
+                XCTAssertTrue("\(error)".contains("Unique constraint violation"))
+            }
+            try conn.dropUniqueIndex(table: "UniqueReopen", property: "email")
+        }
+    }
+
+    func testUniqueIndexEmptyTable() throws {
+        let memDb = try Database(":memory:")
+        let conn = try Connection(memDb)
+        _ = try conn.query("CREATE NODE TABLE UniqueEmpty(id INT64, email STRING, PRIMARY KEY(id))")
+        try conn.createUniqueIndex(table: "UniqueEmpty", property: "email")
+        let r = try conn.lookupUnique(table: "UniqueEmpty", property: "email", value: "anything")
+        XCTAssertNil(r)
+        // Insert should work on empty table
+        _ = try conn.query("CREATE (:UniqueEmpty {id:1, email:'first@test.com'})")
+        let r2 = try conn.lookupUnique(table: "UniqueEmpty", property: "email", value: "first@test.com")
+        XCTAssertNotNil(r2)
+        try conn.dropUniqueIndex(table: "UniqueEmpty", property: "email")
+    }
+
+    func testUniqueIndexMultipleProperties() throws {
+        let memDb = try Database(":memory:")
+        let conn = try Connection(memDb)
+        _ = try conn.query("CREATE NODE TABLE UniqueMulti(id INT64, email STRING, username STRING, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE (:UniqueMulti {id:1, email:'a@test.com', username:'user_a'})")
+        _ = try conn.query("CREATE (:UniqueMulti {id:2, email:'b@test.com', username:'user_b'})")
+        try conn.createUniqueIndex(table: "UniqueMulti", property: "email")
+        try conn.createUniqueIndex(table: "UniqueMulti", property: "username")
+        let indexes = try conn.listUniqueIndexes(table: "UniqueMulti")
+        XCTAssertEqual(indexes.sorted(), ["email", "username"])
+        // Duplicate email should fail
+        XCTAssertThrowsError(try conn.query("CREATE (:UniqueMulti {id:3, email:'a@test.com', username:'user_c'})")) { error in
+            XCTAssertTrue("\(error)".contains("Unique constraint violation"))
+        }
+        // Duplicate username should fail
+        XCTAssertThrowsError(try conn.query("CREATE (:UniqueMulti {id:4, email:'c@test.com', username:'user_a'})")) { error in
+            XCTAssertTrue("\(error)".contains("Unique constraint violation"))
+        }
+        try conn.dropUniqueIndex(table: "UniqueMulti", property: "email")
+        try conn.dropUniqueIndex(table: "UniqueMulti", property: "username")
+    }
+
+    func testUniqueIndexIfNotExists() throws {
+        let memDb = try Database(":memory:")
+        let conn = try Connection(memDb)
+        _ = try conn.query("CREATE NODE TABLE UniqueIfNot(id INT64, email STRING, PRIMARY KEY(id))")
+        let created = try conn.createUniqueIndexIfNotExists(table: "UniqueIfNot", property: "email")
+        XCTAssertTrue(created)
+        let notCreated = try conn.createUniqueIndexIfNotExists(table: "UniqueIfNot", property: "email")
+        XCTAssertFalse(notCreated)
+        try conn.dropUniqueIndex(table: "UniqueIfNot", property: "email")
+    }
 }
