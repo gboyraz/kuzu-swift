@@ -5,7 +5,6 @@
 //  Copyright © 2023 - 2025 Kùzu Inc.
 //  This code is licensed under MIT license (see LICENSE for details)
 
-import Foundation
 @_implementationOnly import cxx_kuzu
 
 /// A class representing a row in the result set of a query.
@@ -13,6 +12,7 @@ import Foundation
 /// It conforms to `CustomStringConvertible` protocol for easy string representation.
 public final class FlatTuple: CustomStringConvertible, @unchecked Sendable {
     internal var cFlatTuple: kuzu_flat_tuple
+    // Strong reference intentional: keeps QueryResult alive while FlatTuple is in use
     internal var queryResult: QueryResult
 
     internal init(

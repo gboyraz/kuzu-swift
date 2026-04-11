@@ -104,7 +104,7 @@ public final class SystemConfig: @unchecked Sendable {
         cSystemConfig.enable_compression = enableCompression
         cSystemConfig.read_only = readOnly
         cSystemConfig.auto_checkpoint = autoCheckpoint
-        if checkpointThreshold > 0 {
+        if checkpointThreshold != UInt64.max {
             cSystemConfig.checkpoint_threshold = checkpointThreshold
         }
         if maxDBSize > 0 {

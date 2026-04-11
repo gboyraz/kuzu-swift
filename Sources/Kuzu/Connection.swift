@@ -75,12 +75,12 @@ public final class Connection: @unchecked Sendable {
                 kuzu_prepared_statement_destroy(&cPreparedStatement)
             }
             if cErrorMesage == nil {
-                throw KuzuError.prepareStatmentFailed(
+                throw KuzuError.prepareStatementFailed(
                     "Prepare statement failed with an unknown error."
                 )
             } else {
                 let errorMessage = String(cString: cErrorMesage!)
-                throw KuzuError.prepareStatmentFailed(errorMessage)
+                throw KuzuError.prepareStatementFailed(errorMessage)
             }
         }
         let preparedStatement = PreparedStatement(self, cPreparedStatement)
