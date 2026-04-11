@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "catalog/catalog_entry/index_catalog_entry.h"
 #include "common/serializer/buffer_reader.h"
 #include "common/serializer/buffer_writer.h"
 #include "common/serializer/deserializer.h"
@@ -15,6 +16,23 @@
 
 namespace kuzu {
 namespace hash_index_extension {
+
+// ---------------------------------------------------------------------------
+// Catalog aux info for hash index (minimal — no extra data to persist)
+// ---------------------------------------------------------------------------
+struct HashIndexAuxInfo final : catalog::IndexAuxInfo {
+    std::shared_ptr<common::BufferWriter> serialize() const override {
+        return std::make_shared<common::BufferWriter>(0);
+    }
+    std::unique_ptr<IndexAuxInfo> copy() override {
+        return std::make_unique<HashIndexAuxInfo>();
+    }
+    std::string toCypher(const catalog::IndexCatalogEntry& indexEntry,
+        const catalog::ToCypherInfo& /*info*/) const override {
+        return "CALL CREATE_HASH_INDEX('" + indexEntry.getIndexName() + "', '" +
+               indexEntry.getIndexName() + "');";
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Storage info persisted alongside the index
