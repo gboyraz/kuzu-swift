@@ -11,6 +11,7 @@ enum class LogicalScanNodeTableType : uint8_t {
     SCAN = 0,
     PRIMARY_KEY_SCAN = 1,
     SECONDARY_INDEX_SCAN = 2,
+    RANGE_INDEX_SCAN = 3,
 };
 
 struct ExtraScanNodeTableInfo {
@@ -44,6 +45,27 @@ struct SecondaryIndexScanInfo final : ExtraScanNodeTableInfo {
 
     std::unique_ptr<ExtraScanNodeTableInfo> copy() const override {
         return std::make_unique<SecondaryIndexScanInfo>(propertyName, columnID, key);
+    }
+};
+
+struct RangeIndexScanInfo final : ExtraScanNodeTableInfo {
+    std::string propertyName;
+    common::column_id_t columnID;
+    std::shared_ptr<binder::Expression> minKey; // nullptr = open end
+    std::shared_ptr<binder::Expression> maxKey; // nullptr = open end
+    bool minInclusive;
+    bool maxInclusive;
+
+    RangeIndexScanInfo(std::string propertyName, common::column_id_t columnID,
+        std::shared_ptr<binder::Expression> minKey, std::shared_ptr<binder::Expression> maxKey,
+        bool minInclusive, bool maxInclusive)
+        : propertyName{std::move(propertyName)}, columnID{columnID},
+          minKey{std::move(minKey)}, maxKey{std::move(maxKey)},
+          minInclusive{minInclusive}, maxInclusive{maxInclusive} {}
+
+    std::unique_ptr<ExtraScanNodeTableInfo> copy() const override {
+        return std::make_unique<RangeIndexScanInfo>(propertyName, columnID, minKey, maxKey,
+            minInclusive, maxInclusive);
     }
 };
 

@@ -6,6 +6,7 @@
 #include "processor/expression_mapper.h"
 #include "processor/operator/scan/primary_key_scan_node_table.h"
 #include "processor/operator/scan/scan_node_table.h"
+#include "processor/operator/scan/range_index_scan_node_table.h"
 #include "processor/operator/scan/secondary_index_scan_node_table.h"
 #include "processor/plan_mapper.h"
 #include "storage/storage_manager.h"
@@ -97,6 +98,35 @@ std::unique_ptr<PhysicalOperator> PlanMapper::mapScanNodeTable(
         return std::make_unique<SecondaryIndexScanNodeTable>(std::move(scanInfo),
             std::move(tableInfos), std::move(evaluator), indexScanInfo.propertyName,
             std::move(sharedState), getOperatorID(), std::move(printInfo));
+    }
+    case LogicalScanNodeTableType::RANGE_INDEX_SCAN: {
+        auto& rangeScanInfo = scan.getExtraInfo()->constCast<RangeIndexScanInfo>();
+        auto exprMapper = ExpressionMapper(outSchema);
+        std::unique_ptr<evaluator::ExpressionEvaluator> minEval;
+        std::unique_ptr<evaluator::ExpressionEvaluator> maxEval;
+        std::string rangeDesc;
+        if (rangeScanInfo.minKey) {
+            minEval = exprMapper.getEvaluator(rangeScanInfo.minKey);
+            rangeDesc += (rangeScanInfo.minInclusive ? ">= " : "> ") +
+                         rangeScanInfo.minKey->toString();
+        }
+        if (rangeScanInfo.maxKey) {
+            if (!rangeDesc.empty()) {
+                rangeDesc += " AND ";
+            }
+            maxEval = exprMapper.getEvaluator(rangeScanInfo.maxKey);
+            rangeDesc += (rangeScanInfo.maxInclusive ? "<= " : "< ") +
+                         rangeScanInfo.maxKey->toString();
+        }
+        auto sharedState =
+            std::make_shared<RangeIndexScanSharedState>(tableInfos.size());
+        auto printInfo = std::make_unique<RangeIndexScanPrintInfo>(
+            scan.getProperties(), alias, rangeScanInfo.propertyName, rangeDesc);
+        return std::make_unique<RangeIndexScanNodeTable>(std::move(scanInfo),
+            std::move(tableInfos), std::move(minEval), std::move(maxEval),
+            rangeScanInfo.propertyName, rangeScanInfo.minInclusive,
+            rangeScanInfo.maxInclusive, std::move(sharedState), getOperatorID(),
+            std::move(printInfo));
     }
     default:
         KU_UNREACHABLE;

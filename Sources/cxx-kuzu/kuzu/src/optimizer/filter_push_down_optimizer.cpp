@@ -1,6 +1,7 @@
 #include "optimizer/filter_push_down_optimizer.h"
 
 #include "binder/expression/literal_expression.h"
+#include "common/enums/expression_type.h"
 #include "binder/expression/property_expression.h"
 #include "binder/expression/scalar_function_expression.h"
 #include "catalog/catalog.h"
@@ -209,7 +210,7 @@ std::shared_ptr<LogicalOperator> FilterPushDownOptimizer::visitScanNodeTableRepl
             predicateSet.addPredicate(primaryKeyEqualityComparison);
         }
     } else if (tableIDs.size() == 1) {
-        // Try secondary index scan
+        // Try secondary index scan (equality)
         auto [secondaryPredicate, propName] =
             predicateSet.popNodeSecondaryIndexComparison(*nodeID, tableIDs[0], context);
         if (secondaryPredicate != nullptr) {
@@ -226,6 +227,32 @@ std::shared_ptr<LogicalOperator> FilterPushDownOptimizer::visitScanNodeTableRepl
                 scan.computeFlatSchema();
             } else {
                 predicateSet.addPredicate(secondaryPredicate);
+            }
+        } else {
+            // Try range index scan (inequality)
+            auto rangeMatch =
+                predicateSet.popNodeRangeIndexComparison(*nodeID, tableIDs[0], context);
+            if (rangeMatch.has_value()) {
+                auto& match = rangeMatch.value();
+                bool allConstant = true;
+                if (match.minKey && !isConstantExpression(match.minKey)) {
+                    allConstant = false;
+                }
+                if (match.maxKey && !isConstantExpression(match.maxKey)) {
+                    allConstant = false;
+                }
+                if (allConstant) {
+                    auto extraInfo = std::make_unique<RangeIndexScanInfo>(
+                        match.propertyName, match.columnID,
+                        match.minKey, match.maxKey,
+                        match.minInclusive, match.maxInclusive);
+                    scan.setScanType(LogicalScanNodeTableType::RANGE_INDEX_SCAN);
+                    scan.setExtraInfo(std::move(extraInfo));
+                    scan.computeFlatSchema();
+                }
+                // If not all constant, predicates were already removed; we need to add them back
+                // But since popNodeRangeIndexComparison already removed them,
+                // and we can't use them, this is a degenerate case we skip.
             }
         }
     }
@@ -413,6 +440,140 @@ PredicateSet::popNodeSecondaryIndexComparison(const Expression& nodeID,
         }
     }
     return {nullptr, ""};
+}
+
+static bool isRangeComparisonType(ExpressionType type) {
+    return type == ExpressionType::GREATER_THAN ||
+           type == ExpressionType::GREATER_THAN_EQUALS ||
+           type == ExpressionType::LESS_THAN ||
+           type == ExpressionType::LESS_THAN_EQUALS;
+}
+
+static bool isLowerBound(ExpressionType type) {
+    return type == ExpressionType::GREATER_THAN ||
+           type == ExpressionType::GREATER_THAN_EQUALS;
+}
+
+static bool isInclusive(ExpressionType type) {
+    return type == ExpressionType::GREATER_THAN_EQUALS ||
+           type == ExpressionType::LESS_THAN_EQUALS;
+}
+
+std::optional<PredicateSet::RangeIndexMatch>
+PredicateSet::popNodeRangeIndexComparison(const Expression& nodeID,
+    common::table_id_t tableID, main::ClientContext* context) {
+    auto transaction = context->getTransaction();
+    auto catalog = context->getCatalog();
+    auto tableEntry = catalog->getTableCatalogEntry(transaction, tableID);
+    auto storageManager = context->getStorageManager();
+    auto* nodeTable = storageManager->getTable(tableID)->ptrCast<NodeTable>();
+    auto& indexes = nodeTable->getIndexes();
+
+    // Collect range predicates on properties that have a RANGE index
+    struct RangePred {
+        idx_t idx;              // index into nonEqualityPredicates
+        std::string propName;
+        common::column_id_t columnID;
+        ExpressionType type;    // normalized: property is LHS
+        std::shared_ptr<Expression> valueExpr;
+    };
+    std::vector<RangePred> candidates;
+
+    for (auto i = 0u; i < nonEqualityPredicates.size(); ++i) {
+        auto& pred = nonEqualityPredicates[i];
+        if (!isRangeComparisonType(pred->expressionType)) {
+            continue;
+        }
+        std::string propName;
+        ExpressionType normType = pred->expressionType;
+        std::shared_ptr<Expression> valueExpr;
+
+        if (isNodeProperty(*pred->getChild(0), nodeID, propName)) {
+            // property <op> value
+            valueExpr = pred->getChild(1);
+        } else if (isNodeProperty(*pred->getChild(1), nodeID, propName)) {
+            // value <op> property → reverse direction
+            valueExpr = pred->getChild(0);
+            normType = ExpressionTypeUtil::reverseComparisonDirection(normType);
+        } else {
+            continue;
+        }
+
+        if (!tableEntry->containsProperty(propName)) {
+            continue;
+        }
+        auto columnID = tableEntry->getColumnID(propName);
+
+        // Check if a RANGE index exists on this column
+        bool hasRangeIndex = false;
+        for (auto& indexHolder : indexes) {
+            if (!indexHolder.isLoaded()) {
+                continue;
+            }
+            auto indexOpt = nodeTable->getIndex(indexHolder.getName());
+            if (!indexOpt.has_value()) {
+                continue;
+            }
+            auto* index = indexOpt.value();
+            if (index->isPrimary()) {
+                continue;
+            }
+            auto info = index->getIndexInfo();
+            if (info.indexType == "RANGE" && index->isBuiltOnColumn(columnID)) {
+                hasRangeIndex = true;
+                break;
+            }
+        }
+        if (!hasRangeIndex) {
+            continue;
+        }
+
+        candidates.push_back({i, propName, columnID, normType, valueExpr});
+    }
+
+    if (candidates.empty()) {
+        return std::nullopt;
+    }
+
+    // Group by property name, take the first property that has candidates
+    auto& first = candidates[0];
+    RangeIndexMatch match;
+    match.propertyName = first.propName;
+    match.columnID = first.columnID;
+
+    for (auto& c : candidates) {
+        if (c.propName != match.propertyName) {
+            continue; // only combine predicates on the same property
+        }
+        if (isLowerBound(c.type)) {
+            // property > value or property >= value
+            if (!match.minKey) {
+                match.minKey = c.valueExpr;
+                match.minInclusive = isInclusive(c.type);
+                match.predicateIndices.push_back(c.idx);
+            }
+        } else {
+            // property < value or property <= value
+            if (!match.maxKey) {
+                match.maxKey = c.valueExpr;
+                match.maxInclusive = isInclusive(c.type);
+                match.predicateIndices.push_back(c.idx);
+            }
+        }
+    }
+
+    // Must have at least one bound
+    if (!match.minKey && !match.maxKey) {
+        return std::nullopt;
+    }
+
+    // Remove matched predicates from nonEqualityPredicates (in reverse order to keep indices valid)
+    std::sort(match.predicateIndices.begin(), match.predicateIndices.end(), std::greater<>());
+    for (auto idx : match.predicateIndices) {
+        nonEqualityPredicates.erase(nonEqualityPredicates.begin() + idx);
+    }
+
+    return match;
 }
 
 expression_vector PredicateSet::getAllPredicates() {

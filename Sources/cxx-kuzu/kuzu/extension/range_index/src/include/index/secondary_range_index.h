@@ -65,7 +65,8 @@ public:
         std::vector<common::offset_t>& result) const = 0;
     virtual void rangeLookup(const uint8_t* minKey, const uint8_t* maxKey,
         bool hasMin, bool hasMax,
-        std::vector<common::offset_t>& result) const = 0;
+        std::vector<common::offset_t>& result,
+        bool minInclusive = true, bool maxInclusive = true) const = 0;
     virtual uint64_t size() const = 0;
     virtual void clear() = 0;
     virtual void serializeEntries(common::Serializer& serializer) const = 0;
@@ -84,7 +85,8 @@ public:
         std::vector<common::offset_t>& result) const override;
     void rangeLookup(const uint8_t* minKey, const uint8_t* maxKey,
         bool hasMin, bool hasMax,
-        std::vector<common::offset_t>& result) const override;
+        std::vector<common::offset_t>& result,
+        bool minInclusive = true, bool maxInclusive = true) const override;
     uint64_t size() const override { return totalEntries; }
     void clear() override {
         entries.clear();
@@ -135,8 +137,9 @@ public:
     }
 
     bool lookup(const uint8_t* keyData, std::vector<common::offset_t>& result) const override;
-    void rangeLookup(const uint8_t* minKey, const uint8_t* maxKey,
-        bool hasMin, bool hasMax, std::vector<common::offset_t>& result) const;
+    bool rangeLookup(const uint8_t* minKey, const uint8_t* maxKey,
+        bool hasMin, bool hasMax, std::vector<common::offset_t>& result,
+        bool minInclusive = true, bool maxInclusive = true) const override;
 
 private:
     void initInnerIndex();

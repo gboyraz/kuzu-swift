@@ -1657,4 +1657,77 @@ final class ConnectionTests: XCTestCase {
         XCTAssertEqual(indexes[0], "val")
         try conn.dropRangeIndex(table: "RangeEmpty", property: "val")
     }
+
+    // MARK: - Range Index Optimizer Tests
+
+    func testRangeIndexOptimizerSinglePredicate() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "age")
+        // WHERE p.age > 30 should use range index scan
+        let result = try conn.query("MATCH (p:RangeTest) WHERE p.age > 30 RETURN p.name ORDER BY p.name")
+        var names: [String] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                if let name = try tuple.getValue(0) as? String {
+                    names.append(name)
+                }
+            }
+        }
+        result.close()
+        XCTAssertEqual(names, ["Charlie"]) // age 35
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
+
+    func testRangeIndexOptimizerDualPredicate() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "age")
+        // WHERE p.age >= 25 AND p.age <= 30 should use a single range index scan
+        let result = try conn.query("MATCH (p:RangeTest) WHERE p.age >= 25 AND p.age <= 30 RETURN p.name ORDER BY p.name")
+        var names: [String] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                if let name = try tuple.getValue(0) as? String {
+                    names.append(name)
+                }
+            }
+        }
+        result.close()
+        // Alice(25), Bob(30), Diana(28)
+        XCTAssertEqual(names, ["Alice", "Bob", "Diana"])
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
+
+    func testRangeIndexOptimizerNoIndexFallback() throws {
+        let (_, conn) = try makeRangeTestDb()
+        // No range index — should still work via regular scan + filter
+        let result = try conn.query("MATCH (p:RangeTest) WHERE p.age > 30 RETURN p.name")
+        var names: [String] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                if let name = try tuple.getValue(0) as? String {
+                    names.append(name)
+                }
+            }
+        }
+        result.close()
+        XCTAssertEqual(names.count, 1) // Charlie(35)
+    }
+
+    func testRangeIndexOptimizerReversedPredicate() throws {
+        let (_, conn) = try makeRangeTestDb()
+        try conn.createRangeIndex(table: "RangeTest", property: "age")
+        // WHERE 30 < p.age — reversed operand order, optimizer should still detect it
+        let result = try conn.query("MATCH (p:RangeTest) WHERE 30 < p.age RETURN p.name ORDER BY p.name")
+        var names: [String] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                if let name = try tuple.getValue(0) as? String {
+                    names.append(name)
+                }
+            }
+        }
+        result.close()
+        XCTAssertEqual(names, ["Charlie"]) // age 35
+        try conn.dropRangeIndex(table: "RangeTest", property: "age")
+    }
 }

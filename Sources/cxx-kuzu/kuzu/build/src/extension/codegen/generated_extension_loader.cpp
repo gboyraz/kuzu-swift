@@ -36,6 +36,12 @@ void loadLinkedExtensions([[maybe_unused]] main::ClientContext* context,
         loadedExtensions.push_back(LoadedExtension(hash_index_extension::HashIndexExtension::EXTENSION_NAME, " ",
             ExtensionSource::STATIC_LINKED));
     }
+{
+        range_index_extension::RangeIndexExtension extension{};
+        extension.load(context);
+        loadedExtensions.push_back(LoadedExtension(range_index_extension::RangeIndexExtension::EXTENSION_NAME, " ",
+            ExtensionSource::STATIC_LINKED));
+    }
 
 }
 

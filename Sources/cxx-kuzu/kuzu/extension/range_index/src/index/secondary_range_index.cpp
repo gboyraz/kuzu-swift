@@ -100,18 +100,27 @@ bool TypedInnerRangeIndex<T>::lookupOffsets(const uint8_t* keyData,
 template<typename T>
 void TypedInnerRangeIndex<T>::rangeLookup(const uint8_t* minKey, const uint8_t* maxKey,
     bool hasMin, bool hasMax,
-    std::vector<offset_t>& result) const {
+    std::vector<offset_t>& result,
+    bool minInclusive, bool maxInclusive) const {
     typename std::map<KeyType, std::vector<offset_t>>::const_iterator itBegin;
     typename std::map<KeyType, std::vector<offset_t>>::const_iterator itEnd;
     if (hasMin) {
         auto minVal = extractKey(minKey);
-        itBegin = entries.lower_bound(minVal);
+        if (minInclusive) {
+            itBegin = entries.lower_bound(minVal); // >= minVal
+        } else {
+            itBegin = entries.upper_bound(minVal); // > minVal
+        }
     } else {
         itBegin = entries.begin();
     }
     if (hasMax) {
         auto maxVal = extractKey(maxKey);
-        itEnd = entries.upper_bound(maxVal); // inclusive upper bound
+        if (maxInclusive) {
+            itEnd = entries.upper_bound(maxVal); // <= maxVal
+        } else {
+            itEnd = entries.lower_bound(maxVal); // < maxVal
+        }
     } else {
         itEnd = entries.end();
     }
@@ -330,10 +339,12 @@ bool SecondaryRangeIndex::lookup(const uint8_t* keyData,
     return innerIndex->lookupOffsets(keyData, result);
 }
 
-void SecondaryRangeIndex::rangeLookup(const uint8_t* minKey, const uint8_t* maxKey,
-    bool hasMin, bool hasMax, std::vector<offset_t>& result) const {
+bool SecondaryRangeIndex::rangeLookup(const uint8_t* minKey, const uint8_t* maxKey,
+    bool hasMin, bool hasMax, std::vector<offset_t>& result,
+    bool minInclusive, bool maxInclusive) const {
     std::lock_guard<std::mutex> lock(mtx);
-    innerIndex->rangeLookup(minKey, maxKey, hasMin, hasMax, result);
+    innerIndex->rangeLookup(minKey, maxKey, hasMin, hasMax, result, minInclusive, maxInclusive);
+    return !result.empty();
 }
 
 } // namespace range_index_extension

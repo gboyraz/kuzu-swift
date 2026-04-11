@@ -158,6 +158,15 @@ public:
         return false;
     }
 
+    // Range index lookup: returns offsets matching the given range.
+    // Override in range index implementations.
+    virtual bool rangeLookup(const uint8_t* /*minKey*/, const uint8_t* /*maxKey*/,
+        bool /*hasMin*/, bool /*hasMax*/,
+        std::vector<common::offset_t>& /*result*/,
+        bool /*minInclusive*/ = true, bool /*maxInclusive*/ = true) const {
+        return false;
+    }
+
     virtual void checkpointInMemory() {
         // DO NOTHING.
     };

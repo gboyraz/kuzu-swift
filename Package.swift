@@ -740,6 +740,7 @@ let package = Package(
                 "kuzu/src/processor/operator/recursive_extend.cpp",
                 "kuzu/src/processor/operator/result_collector.cpp",
                 "kuzu/src/processor/operator/scan/primary_key_scan_node_table.cpp",
+                "kuzu/src/processor/operator/scan/range_index_scan_node_table.cpp",
                 "kuzu/src/processor/operator/scan/secondary_index_scan_node_table.cpp",
                 "kuzu/src/processor/operator/scan/scan_multi_rel_tables.cpp",
                 "kuzu/src/processor/operator/scan/scan_node_table.cpp",
