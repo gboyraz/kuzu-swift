@@ -441,6 +441,108 @@ public final class Connection: @unchecked Sendable {
         let result = try query("CALL DROP_VECTOR_INDEX('\(table)', '\(indexName)')")
         result.close()
     }
+
+    // MARK: - Range Index
+
+    /// Creates a range index on a node table property for range queries.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the property to index.
+    /// - Throws: KuzuError if index creation fails.
+    public func createRangeIndex(table: String, property: String) throws {
+        let result = try query("CALL CREATE_RANGE_INDEX('\(table)', '\(property)')")
+        result.close()
+    }
+
+    /// Creates a range index if one doesn't already exist.
+    /// Safe to call on every app launch — idempotent.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the property to index.
+    /// - Returns: `true` if the index was created, `false` if it already existed.
+    /// - Throws: KuzuError if index creation fails for reasons other than the index already existing.
+    @discardableResult
+    public func createRangeIndexIfNotExists(table: String, property: String) throws -> Bool {
+        do {
+            try createRangeIndex(table: table, property: property)
+            return true
+        } catch {
+            let msg = "\(error)"
+            if msg.contains("already exists") {
+                return false
+            }
+            throw error
+        }
+    }
+
+    /// Queries a range index for node IDs matching the given min/max bounds.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the indexed property.
+    ///   - min: Minimum value (inclusive). Pass `nil` for no lower bound.
+    ///   - max: Maximum value (inclusive). Pass `nil` for no upper bound.
+    /// - Returns: An array of matching internal node IDs.
+    /// - Throws: KuzuError if the query fails.
+    public func queryRange(table: String, property: String, min: String? = nil, max: String? = nil) throws -> [UInt64] {
+        let minStr = min ?? ""
+        let maxStr = max ?? ""
+        let result = try query("CALL QUERY_RANGE_INDEX('\(table)', '\(property)', '\(minStr)', '\(maxStr)') RETURN node_id")
+        defer { result.close() }
+        var ids: [UInt64] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                let val = try tuple.getValue(0)
+                if let id = val as? KuzuInternalId {
+                    ids.append(id.offset)
+                } else if let id = val as? UInt64 {
+                    ids.append(id)
+                } else if let id = val as? Int64 {
+                    ids.append(UInt64(bitPattern: id))
+                }
+            }
+        }
+        return ids
+    }
+
+    /// Drops a range index on a node table property.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the indexed property.
+    /// - Throws: KuzuError if dropping the index fails.
+    public func dropRangeIndex(table: String, property: String) throws {
+        let result = try query("CALL DROP_RANGE_INDEX('\(table)', '\(property)')")
+        result.close()
+    }
+
+    /// Checks whether a range index exists on the given table property.
+    /// - Parameters:
+    ///   - table: The name of the node table.
+    ///   - property: The name of the property to check.
+    /// - Returns: `true` if a range index exists on the property, `false` otherwise.
+    /// - Throws: KuzuError if the check fails.
+    public func hasRangeIndex(table: String, property: String) throws -> Bool {
+        let indexes = try listRangeIndexes(table: table)
+        return indexes.contains(property)
+    }
+
+    /// Lists all range indexes on a table. Returns property names that have indexes.
+    /// - Parameter table: The name of the node table.
+    /// - Returns: An array of property names that have range indexes.
+    /// - Throws: KuzuError if the query fails.
+    public func listRangeIndexes(table: String) throws -> [String] {
+        let result = try query("CALL LIST_RANGE_INDEXES('\(table)') RETURN property_name")
+        defer { result.close() }
+        var names: [String] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                let val = try tuple.getValue(0)
+                if let name = val as? String {
+                    names.append(name)
+                }
+            }
+        }
+        return names
+    }
 }
 
 /// Search result from a vector index KNN query.
