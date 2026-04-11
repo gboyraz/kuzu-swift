@@ -194,4 +194,118 @@ final class ConnectionTests: XCTestCase {
         XCTAssertEqual(count, 0, "All TestItem nodes should be deleted")
         NSLog("testPreparedStatementReuseNoDoubleFree passed — no crash")
     }
+
+    /// Regression test for GitHub issue #25 (second comment): interleaved PreparedStatements
+    /// from the same Connection cause double-free during ARC batch deallocation.
+    /// The crash happens when multiple DIFFERENT PreparedStatements produce QueryResults
+    /// in a loop — ARC defers cleanup until scope exit, and the C++ results share
+    /// internal Connection state (catalog snapshots, memory pools).
+    func testInterleavedPreparedStatementsNoDoubleFree() throws {
+        let conn = try Connection(db)
+
+        // Set up: node tables with edges (mimics the moveToTrash pattern from issue #25)
+        _ = try conn.query(
+            "CREATE NODE TABLE Image (id STRING, PRIMARY KEY (id));"
+        )
+        _ = try conn.query(
+            "CREATE NODE TABLE Collection (id STRING, PRIMARY KEY (id));"
+        )
+        _ = try conn.query(
+            "CREATE REL TABLE BELONGS_TO (FROM Image TO Collection);"
+        )
+
+        // Create images and collections
+        _ = try conn.query("CREATE (c:Collection {id: 'source'});")
+        _ = try conn.query("CREATE (c:Collection {id: 'trash'});")
+        for i in 1...5 {
+            _ = try conn.query("CREATE (i:Image {id: 'img\(i)'});")
+            _ = try conn.query(
+                "MATCH (i:Image {id: 'img\(i)'}), (c:Collection {id: 'source'}) CREATE (i)-[:BELONGS_TO]->(c);"
+            )
+        }
+
+        // This is the exact pattern from the issue: interleaved prepare+execute with
+        // different statements in the same loop, producing multiple QueryResults.
+        let removeStmt = try conn.prepare("""
+            MATCH (i:Image {id: $iid})-[b:BELONGS_TO]->(c:Collection {id: $cid})
+            DELETE b
+            """)
+
+        let checkStmt = try conn.prepare("""
+            MATCH (i:Image {id: $iid})-[b:BELONGS_TO]->(c:Collection {id: $cid})
+            RETURN count(b)
+            """)
+
+        let createStmt = try conn.prepare("""
+            MATCH (i:Image {id: $iid}), (c:Collection {id: $cid})
+            CREATE (i)-[:BELONGS_TO]->(c)
+            """)
+
+        for i in 1...5 {
+            let imageId = "img\(i)"
+
+            // 1. Delete edge from source
+            _ = try conn.execute(
+                removeStmt,
+                ["iid": imageId, "cid": "source"] as [String: Any?]
+            )
+
+            // 2. Check if already in trash
+            let checkResult = try conn.execute(
+                checkStmt,
+                ["iid": imageId, "cid": "trash"] as [String: Any?]
+            )
+            if checkResult.hasNext() {
+                let tuple = try checkResult.getNext()!
+                let count = try tuple.getValue(0) as! Int64
+                XCTAssertEqual(count, 0)
+            }
+
+            // 3. Create edge to trash
+            _ = try conn.execute(
+                createStmt,
+                ["iid": imageId, "cid": "trash"] as [String: Any?]
+            )
+        }
+
+        // Verify: all images should now belong to trash, not source
+        let result = try conn.query(
+            "MATCH (i:Image)-[:BELONGS_TO]->(c:Collection {id: 'trash'}) RETURN COUNT(i);"
+        )
+        XCTAssertTrue(result.hasNext())
+        let tuple = try result.getNext()!
+        let count = try tuple.getValue(0) as! Int64
+        XCTAssertEqual(count, 5, "All 5 images should be in trash")
+
+        let sourceResult = try conn.query(
+            "MATCH (i:Image)-[:BELONGS_TO]->(c:Collection {id: 'source'}) RETURN COUNT(i);"
+        )
+        XCTAssertTrue(sourceResult.hasNext())
+        let sourceTuple = try sourceResult.getNext()!
+        let sourceCount = try sourceTuple.getValue(0) as! Int64
+        XCTAssertEqual(sourceCount, 0, "No images should remain in source")
+
+        NSLog("testInterleavedPreparedStatementsNoDoubleFree passed — no crash")
+    }
+
+    /// Tests that QueryResult.close() can be called explicitly for eager cleanup.
+    func testQueryResultExplicitClose() throws {
+        let conn = try Connection(db)
+        let result = try conn.query("MATCH (a:person) RETURN a.fName LIMIT 1;")
+        XCTAssertTrue(result.hasNext())
+        _ = try result.getNext()
+
+        // Explicitly close — should not crash
+        result.close()
+
+        // Calling close again should be safe (idempotent)
+        result.close()
+
+        // The connection should still work after closing a result
+        let result2 = try conn.query("RETURN 42;")
+        XCTAssertTrue(result2.hasNext())
+        let tuple = try result2.getNext()!
+        let value = try tuple.getValue(0) as! Int64
+        XCTAssertEqual(value, 42)
+    }
 }
