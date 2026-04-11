@@ -5,7 +5,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "catalog/catalog.h"
 #include "catalog/catalog_entry/index_catalog_entry.h"
+#include "main/client_context.h"
 #include "common/serializer/buffer_reader.h"
 #include "common/serializer/buffer_writer.h"
 #include "common/serializer/deserializer.h"
@@ -29,9 +31,15 @@ struct RangeIndexAuxInfo final : catalog::IndexAuxInfo {
         return std::make_unique<RangeIndexAuxInfo>();
     }
     std::string toCypher(const catalog::IndexCatalogEntry& indexEntry,
-        const catalog::ToCypherInfo& /*info*/) const override {
-        return "CALL CREATE_RANGE_INDEX('" + indexEntry.getIndexName() + "', '" +
-               indexEntry.getIndexName() + "');";
+        const catalog::ToCypherInfo& info) const override {
+        auto& indexToCypherInfo = info.constCast<catalog::IndexToCypherInfo>();
+        auto context = indexToCypherInfo.context;
+        auto catalog = context->getCatalog();
+        auto tableEntry =
+            catalog->getTableCatalogEntry(context->getTransaction(), indexEntry.getTableID());
+        auto tableName = tableEntry->getName();
+        auto propertyName = tableEntry->getProperty(indexEntry.getPropertyIDs()[0]).getName();
+        return "CALL CREATE_RANGE_INDEX('" + tableName + "', '" + propertyName + "');";
     }
 };
 
