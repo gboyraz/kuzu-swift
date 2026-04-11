@@ -1251,4 +1251,216 @@ final class ConnectionTests: XCTestCase {
         XCTAssertFalse(createdAgain)
         try conn.dropHashIndex(table: "Person", property: "firstName,lastName")
     }
+
+    // MARK: - WAL Recovery Tests
+
+    /// Test that a hash index survives DB close and reopen (with checkpoint).
+    func testHashIndexSurvivesReopen() throws {
+        let dbPath = NSTemporaryDirectory() + "kuzu_wal_reopen_" + UUID().uuidString
+        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+
+        let config = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 1,
+            autoCheckpoint: true
+        )
+
+        // Phase 1: Create table, insert data, create index, close DB
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            _ = try conn.query(
+                "CREATE NODE TABLE WalTest(id INT64, email STRING, PRIMARY KEY(id))")
+            _ = try conn.query("CREATE (:WalTest {id:1, email:'a@test.com'})")
+            _ = try conn.query("CREATE (:WalTest {id:2, email:'b@test.com'})")
+            _ = try conn.query("CREATE (:WalTest {id:3, email:'c@test.com'})")
+            try conn.createHashIndex(table: "WalTest", property: "email")
+            // Verify index works before close
+            let r = try conn.lookupByIndex(table: "WalTest", property: "email", value: "a@test.com")
+            XCTAssertEqual(r.count, 1)
+        }
+
+        // Phase 2: Reopen DB and verify index still works
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+
+            // First verify data is there
+            let countResult = try conn.query("MATCH (p:WalTest) RETURN count(p)")
+            XCTAssertTrue(countResult.hasNext())
+            let countTuple = try countResult.getNext()!
+            let count = try countTuple.getValue(0) as! Int64
+            XCTAssertEqual(count, 3, "Data should persist after restart")
+
+            let has = try conn.hasHashIndex(table: "WalTest", property: "email")
+            XCTAssertTrue(has, "Index should exist after reopen")
+            let r1 = try conn.lookupByIndex(table: "WalTest", property: "email", value: "a@test.com")
+            XCTAssertEqual(r1.count, 1, "Should find 'a@test.com' after reopen")
+            let r2 = try conn.lookupByIndex(table: "WalTest", property: "email", value: "b@test.com")
+            XCTAssertEqual(r2.count, 1, "Should find 'b@test.com' after reopen")
+            let r3 = try conn.lookupByIndex(table: "WalTest", property: "email", value: "nonexistent@test.com")
+            XCTAssertEqual(r3.count, 0, "Should not find nonexistent value")
+            try conn.dropHashIndex(table: "WalTest", property: "email")
+        }
+    }
+
+    /// Test that a hash index survives DB close without explicit checkpoint (WAL recovery).
+    func testHashIndexSurvivesReopenWithoutCheckpoint() throws {
+        let dbPath = NSTemporaryDirectory() + "kuzu_wal_nocp_" + UUID().uuidString
+        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+
+        // Disable auto-checkpoint so index creation is only in WAL
+        let config = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 1,
+            autoCheckpoint: false
+        )
+
+        // Phase 1: Create table, insert data, create index (no checkpoint)
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            _ = try conn.query(
+                "CREATE NODE TABLE WalNoCp(id INT64, name STRING, PRIMARY KEY(id))")
+            _ = try conn.query("CREATE (:WalNoCp {id:1, name:'Alice'})")
+            _ = try conn.query("CREATE (:WalNoCp {id:2, name:'Bob'})")
+            try conn.createHashIndex(table: "WalNoCp", property: "name")
+            let r = try conn.lookupByIndex(table: "WalNoCp", property: "name", value: "Alice")
+            XCTAssertEqual(r.count, 1)
+        }
+
+        // Phase 2: Reopen — WAL recovery should rebuild the index
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            let has = try conn.hasHashIndex(table: "WalNoCp", property: "name")
+            XCTAssertTrue(has, "Index should exist after WAL recovery")
+            let r1 = try conn.lookupByIndex(table: "WalNoCp", property: "name", value: "Alice")
+            XCTAssertEqual(r1.count, 1, "Should find 'Alice' after WAL recovery")
+            let r2 = try conn.lookupByIndex(table: "WalNoCp", property: "name", value: "Bob")
+            XCTAssertEqual(r2.count, 1, "Should find 'Bob' after WAL recovery")
+            try conn.dropHashIndex(table: "WalNoCp", property: "name")
+        }
+    }
+
+    /// Test that dropping a hash index survives DB close and reopen.
+    func testDropHashIndexSurvivesReopen() throws {
+        let dbPath = NSTemporaryDirectory() + "kuzu_wal_drop_" + UUID().uuidString
+        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+
+        let config = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 1,
+            autoCheckpoint: true
+        )
+
+        // Phase 1: Create table, data, index, then drop the index
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            _ = try conn.query(
+                "CREATE NODE TABLE WalDrop(id INT64, email STRING, PRIMARY KEY(id))")
+            _ = try conn.query("CREATE (:WalDrop {id:1, email:'x@test.com'})")
+            try conn.createHashIndex(table: "WalDrop", property: "email")
+            let has = try conn.hasHashIndex(table: "WalDrop", property: "email")
+            XCTAssertTrue(has)
+            try conn.dropHashIndex(table: "WalDrop", property: "email")
+            let hasAfter = try conn.hasHashIndex(table: "WalDrop", property: "email")
+            XCTAssertFalse(hasAfter)
+        }
+
+        // Phase 2: Reopen and verify index is still gone
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            let has = try conn.hasHashIndex(table: "WalDrop", property: "email")
+            XCTAssertFalse(has, "Dropped index should not exist after reopen")
+        }
+    }
+
+    /// Test that a composite index survives DB close and reopen.
+    func testCompositeIndexSurvivesReopen() throws {
+        let dbPath = NSTemporaryDirectory() + "kuzu_wal_composite_" + UUID().uuidString
+        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+
+        let config = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 1,
+            autoCheckpoint: true
+        )
+
+        // Phase 1: Create table, data, composite index
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            _ = try conn.query("""
+                CREATE NODE TABLE WalComp(
+                    id INT64, firstName STRING, lastName STRING, PRIMARY KEY(id))
+            """)
+            _ = try conn.query("CREATE (:WalComp {id:1, firstName:'Ali', lastName:'Yilmaz'})")
+            _ = try conn.query("CREATE (:WalComp {id:2, firstName:'Veli', lastName:'Kaya'})")
+            _ = try conn.query("CREATE (:WalComp {id:3, firstName:'Ali', lastName:'Kaya'})")
+            try conn.createCompositeIndex(table: "WalComp", properties: ["firstName", "lastName"])
+            let r = try conn.lookupByCompositeIndex(
+                table: "WalComp", properties: ["firstName", "lastName"], values: ["Ali", "Yilmaz"])
+            XCTAssertEqual(r.count, 1)
+        }
+
+        // Phase 2: Reopen and verify composite index works
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            let has = try conn.hasHashIndex(table: "WalComp", property: "firstName,lastName")
+            XCTAssertTrue(has, "Composite index should exist after reopen")
+            let r1 = try conn.lookupByCompositeIndex(
+                table: "WalComp", properties: ["firstName", "lastName"], values: ["Ali", "Yilmaz"])
+            XCTAssertEqual(r1.count, 1, "Should find Ali Yilmaz after reopen")
+            let r2 = try conn.lookupByCompositeIndex(
+                table: "WalComp", properties: ["firstName", "lastName"], values: ["Veli", "Kaya"])
+            XCTAssertEqual(r2.count, 1, "Should find Veli Kaya after reopen")
+            let r3 = try conn.lookupByCompositeIndex(
+                table: "WalComp", properties: ["firstName", "lastName"], values: ["Ali", "Kaya"])
+            XCTAssertEqual(r3.count, 1, "Should find Ali Kaya after reopen")
+            try conn.dropHashIndex(table: "WalComp", property: "firstName,lastName")
+        }
+    }
+
+    /// Test that a BOOL property index survives DB close and reopen.
+    func testBoolIndexSurvivesReopen() throws {
+        let dbPath = NSTemporaryDirectory() + "kuzu_wal_bool_" + UUID().uuidString
+        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+
+        let config = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 1,
+            autoCheckpoint: true
+        )
+
+        // Phase 1: Create table with BOOL, data, index
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            _ = try conn.query(
+                "CREATE NODE TABLE WalBool(id INT64, active BOOL, PRIMARY KEY(id))")
+            _ = try conn.query("CREATE (:WalBool {id:1, active:true})")
+            _ = try conn.query("CREATE (:WalBool {id:2, active:false})")
+            _ = try conn.query("CREATE (:WalBool {id:3, active:true})")
+            try conn.createHashIndex(table: "WalBool", property: "active")
+            let r = try conn.lookupByIndex(table: "WalBool", property: "active", value: "true")
+            XCTAssertEqual(r.count, 2)
+        }
+
+        // Phase 2: Reopen and verify BOOL index works
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            let has = try conn.hasHashIndex(table: "WalBool", property: "active")
+            XCTAssertTrue(has, "Bool index should exist after reopen")
+            let rTrue = try conn.lookupByIndex(table: "WalBool", property: "active", value: "true")
+            XCTAssertEqual(rTrue.count, 2, "Should find 2 active=true after reopen")
+            let rFalse = try conn.lookupByIndex(table: "WalBool", property: "active", value: "false")
+            XCTAssertEqual(rFalse.count, 1, "Should find 1 active=false after reopen")
+            try conn.dropHashIndex(table: "WalBool", property: "active")
+        }
+    }
 }

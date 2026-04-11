@@ -39,6 +39,10 @@ public:
 
     void autoLoadLinkedExtensions(main::ClientContext* context);
 
+    // Re-run extension init functions after WAL recovery to reconcile any
+    // extension-managed indexes that were created by replayed WAL records.
+    void reconcileAfterRecovery(main::ClientContext* context);
+
     bool isStaticLinkedExtension(const std::string& extensionName);
 
 private:

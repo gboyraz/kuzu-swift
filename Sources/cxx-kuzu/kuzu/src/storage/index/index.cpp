@@ -93,7 +93,17 @@ void IndexHolder::load(main::ClientContext* context, StorageManager* storageMana
     }
     KU_ASSERT(!index);
     KU_ASSERT(storageInfoBuffer);
-    auto indexTypeOptional = context->getStorageManager()->getIndexType(indexInfo.indexType);
+    // Use the more specific lookup that matches both typeName AND definitionType to
+    // disambiguate between builtin and extension index types sharing the same name
+    // (e.g. PrimaryKeyIndex "HASH" vs SecondaryHashIndex "HASH").
+    auto defType = indexInfo.isBuiltin ? IndexDefinitionType::BUILTIN :
+                                         IndexDefinitionType::EXTENSION;
+    auto indexTypeOptional =
+        context->getStorageManager()->getIndexType(indexInfo.indexType, defType);
+    if (!indexTypeOptional.has_value()) {
+        // Fall back to name-only lookup for backward compatibility.
+        indexTypeOptional = context->getStorageManager()->getIndexType(indexInfo.indexType);
+    }
     if (!indexTypeOptional.has_value()) {
         throw common::RuntimeException("No index type with name: " + indexInfo.indexType);
     }

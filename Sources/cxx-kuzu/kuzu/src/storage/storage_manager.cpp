@@ -207,6 +207,17 @@ std::optional<std::reference_wrapper<const IndexType>> StorageManager::getIndexT
     return std::nullopt;
 }
 
+std::optional<std::reference_wrapper<const IndexType>> StorageManager::getIndexType(
+    const std::string& typeName, IndexDefinitionType definitionType) const {
+    for (auto& indexType : registeredIndexTypes) {
+        if (StringUtils::caseInsensitiveEquals(indexType.typeName, typeName) &&
+            indexType.definitionType == definitionType) {
+            return indexType;
+        }
+    }
+    return std::nullopt;
+}
+
 void StorageManager::serialize(const Catalog& catalog, Serializer& ser) {
     std::lock_guard lck{mtx};
     auto nodeTableEntries = catalog.getNodeTableEntries(&DUMMY_CHECKPOINT_TRANSACTION);
