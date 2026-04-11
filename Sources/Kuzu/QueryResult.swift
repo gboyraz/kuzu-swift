@@ -53,13 +53,24 @@ public final class QueryResult: CustomStringConvertible, Sequence, @unchecked
         self.connection = connection
     }
 
-    /// Explicitly destroys the underlying C query result and marks this object as destroyed.
-    /// After calling this, the QueryResult should not be used for any further operations.
-    internal func invalidate() {
+    /// Eagerly destroys the underlying C query result, releasing C++ memory immediately
+    /// instead of waiting for ARC deallocation. This prevents double-free crashes when
+    /// multiple QueryResult objects from the same Connection share internal C++ state
+    /// (catalog snapshots, memory pools, etc.) and are batch-deallocated by ARC.
+    ///
+    /// After calling `close()`, the QueryResult should not be used for any further operations.
+    /// It is safe to call `close()` multiple times.
+    public func close() {
         guard !isDestroyed else { return }
         kuzu_query_result_destroy(&cQueryResult)
         cQueryResult._query_result = nil
         isDestroyed = true
+    }
+
+    /// Explicitly destroys the underlying C query result and marks this object as destroyed.
+    /// After calling this, the QueryResult should not be used for any further operations.
+    internal func invalidate() {
+        close()
     }
 
     deinit {
