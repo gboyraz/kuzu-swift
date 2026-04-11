@@ -137,7 +137,7 @@ public:
     }
 
     // Public lookup API for query functions.
-    bool lookup(const uint8_t* keyData, std::vector<common::offset_t>& result) const;
+    bool lookup(const uint8_t* keyData, std::vector<common::offset_t>& result) const override;
 
 private:
     void initInnerIndex();

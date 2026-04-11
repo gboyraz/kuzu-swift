@@ -10,6 +10,7 @@ namespace planner {
 enum class LogicalScanNodeTableType : uint8_t {
     SCAN = 0,
     PRIMARY_KEY_SCAN = 1,
+    SECONDARY_INDEX_SCAN = 2,
 };
 
 struct ExtraScanNodeTableInfo {
@@ -29,6 +30,20 @@ struct PrimaryKeyScanInfo final : ExtraScanNodeTableInfo {
 
     std::unique_ptr<ExtraScanNodeTableInfo> copy() const override {
         return std::make_unique<PrimaryKeyScanInfo>(key);
+    }
+};
+
+struct SecondaryIndexScanInfo final : ExtraScanNodeTableInfo {
+    std::string propertyName;
+    common::column_id_t columnID;
+    std::shared_ptr<binder::Expression> key;
+
+    SecondaryIndexScanInfo(std::string propertyName, common::column_id_t columnID,
+        std::shared_ptr<binder::Expression> key)
+        : propertyName{std::move(propertyName)}, columnID{columnID}, key{std::move(key)} {}
+
+    std::unique_ptr<ExtraScanNodeTableInfo> copy() const override {
+        return std::make_unique<SecondaryIndexScanInfo>(propertyName, columnID, key);
     }
 };
 

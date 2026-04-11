@@ -3,7 +3,12 @@
 #include "binder/expression/literal_expression.h"
 #include "binder/expression/property_expression.h"
 #include "binder/expression/scalar_function_expression.h"
+#include "catalog/catalog.h"
+#include "catalog/catalog_entry/index_catalog_entry.h"
+#include "catalog/catalog_entry/table_catalog_entry.h"
 #include "main/client_context.h"
+#include "storage/storage_manager.h"
+#include "storage/table/node_table.h"
 #include "planner/operator/extend/logical_extend.h"
 #include "planner/operator/logical_empty_result.h"
 #include "planner/operator/logical_filter.h"
@@ -203,6 +208,26 @@ std::shared_ptr<LogicalOperator> FilterPushDownOptimizer::visitScanNodeTableRepl
             // Cannot rewrite and add predicate back.
             predicateSet.addPredicate(primaryKeyEqualityComparison);
         }
+    } else if (tableIDs.size() == 1) {
+        // Try secondary index scan
+        auto [secondaryPredicate, propName] =
+            predicateSet.popNodeSecondaryIndexComparison(*nodeID, tableIDs[0], context);
+        if (secondaryPredicate != nullptr) {
+            auto rhs = secondaryPredicate->getChild(1);
+            if (isConstantExpression(rhs)) {
+                auto transaction = context->getTransaction();
+                auto catalog = context->getCatalog();
+                auto tableEntry = catalog->getTableCatalogEntry(transaction, tableIDs[0]);
+                auto columnID = tableEntry->getColumnID(propName);
+                auto extraInfo =
+                    std::make_unique<SecondaryIndexScanInfo>(propName, columnID, rhs);
+                scan.setScanType(LogicalScanNodeTableType::SECONDARY_INDEX_SCAN);
+                scan.setExtraInfo(std::move(extraInfo));
+                scan.computeFlatSchema();
+            } else {
+                predicateSet.addPredicate(secondaryPredicate);
+            }
+        }
     }
     return finishPushDown(op);
 }
@@ -319,6 +344,75 @@ std::shared_ptr<Expression> PredicateSet::popNodePKEqualityComparison(const Expr
         return result;
     }
     return nullptr;
+}
+
+static bool isNodeProperty(const Expression& expression, const Expression& nodeID,
+    std::string& outPropertyName) {
+    if (expression.expressionType != ExpressionType::PROPERTY) {
+        return false;
+    }
+    auto& property = expression.constCast<PropertyExpression>();
+    if (property.getVariableName() != nodeID.constCast<PropertyExpression>().getVariableName()) {
+        return false;
+    }
+    if (property.isPrimaryKey()) {
+        return false; // PK is handled by popNodePKEqualityComparison
+    }
+    outPropertyName = property.getPropertyName();
+    return true;
+}
+
+std::pair<std::shared_ptr<Expression>, std::string>
+PredicateSet::popNodeSecondaryIndexComparison(const Expression& nodeID,
+    common::table_id_t tableID, main::ClientContext* context) {
+    auto transaction = context->getTransaction();
+    auto catalog = context->getCatalog();
+    auto tableEntry = catalog->getTableCatalogEntry(transaction, tableID);
+    auto storageManager = context->getStorageManager();
+    auto* nodeTable = storageManager->getTable(tableID)->ptrCast<NodeTable>();
+    auto& indexes = nodeTable->getIndexes();
+    for (auto i = 0u; i < equalityPredicates.size(); ++i) {
+        auto predicate = equalityPredicates[i];
+        std::string propName;
+        bool matched = false;
+        if (isNodeProperty(*predicate->getChild(0), nodeID, propName)) {
+            matched = true;
+        } else if (isNodeProperty(*predicate->getChild(1), nodeID, propName)) {
+            // Normalize property to LHS.
+            auto leftChild = predicate->getChild(0);
+            auto rightChild = predicate->getChild(1);
+            predicate->setChild(1, leftChild);
+            predicate->setChild(0, rightChild);
+            matched = true;
+        }
+        if (!matched) {
+            continue;
+        }
+        // Check if a secondary (non-PK) index exists on this property
+        if (!tableEntry->containsProperty(propName)) {
+            continue;
+        }
+        auto columnID = tableEntry->getColumnID(propName);
+        for (auto& indexHolder : indexes) {
+            if (!indexHolder.isLoaded()) {
+                continue;
+            }
+            auto indexOpt = nodeTable->getIndex(indexHolder.getName());
+            if (!indexOpt.has_value()) {
+                continue;
+            }
+            auto* index = indexOpt.value();
+            if (index->isPrimary()) {
+                continue;
+            }
+            if (index->isBuiltOnColumn(columnID)) {
+                auto result = equalityPredicates[i];
+                equalityPredicates.erase(equalityPredicates.begin() + i);
+                return {result, propName};
+            }
+        }
+    }
+    return {nullptr, ""};
 }
 
 expression_vector PredicateSet::getAllPredicates() {

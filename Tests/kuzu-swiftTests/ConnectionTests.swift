@@ -762,4 +762,91 @@ final class ConnectionTests: XCTestCase {
             XCTFail("Unexpected error type: \(error)")
         }
     }
+
+    func testSecondaryIndexScanOptimizer() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        // Create table and data
+        _ = try conn.query(
+            "CREATE NODE TABLE IdxScanTest(id INT64, email STRING, name STRING, PRIMARY KEY(id))"
+        )
+        _ = try conn.query(
+            "CREATE (p:IdxScanTest {id: 1, name: 'Ali', email: 'ali@test.com'})"
+        )
+        _ = try conn.query(
+            "CREATE (p:IdxScanTest {id: 2, name: 'Veli', email: 'veli@test.com'})"
+        )
+        _ = try conn.query(
+            "CREATE (p:IdxScanTest {id: 3, name: 'Ayse', email: 'ayse@test.com'})"
+        )
+
+        // Before index creation: EXPLAIN should show regular Scan
+        let explainBefore = try conn.query(
+            "EXPLAIN MATCH (p:IdxScanTest) WHERE p.email = 'ali@test.com' RETURN p.id, p.email, p.name"
+        )
+        var beforePlan = ""
+        while explainBefore.hasNext() {
+            if let tuple = try explainBefore.getNext() {
+                let val = try tuple.getValue(0) as! String
+                beforePlan += val
+            }
+        }
+        XCTAssertFalse(
+            beforePlan.contains("IndexScan"),
+            "Before index creation, plan should NOT contain IndexScan"
+        )
+
+        // Create index on email
+        try conn.createHashIndex(table: "IdxScanTest", property: "email")
+
+        // After index creation: EXPLAIN should show IndexScan
+        let explainAfter = try conn.query(
+            "EXPLAIN MATCH (p:IdxScanTest) WHERE p.email = 'ali@test.com' RETURN p.id, p.email, p.name"
+        )
+        var afterPlan = ""
+        while explainAfter.hasNext() {
+            if let tuple = try explainAfter.getNext() {
+                let val = try tuple.getValue(0) as! String
+                afterPlan += val
+            }
+        }
+        XCTAssertTrue(
+            afterPlan.contains("IndexScan"),
+            "After index creation, plan should contain IndexScan. Plan: \(afterPlan)"
+        )
+
+        // Run the actual query and verify correct result
+        let result = try conn.query(
+            "MATCH (p:IdxScanTest) WHERE p.email = 'ali@test.com' RETURN p.id, p.email, p.name"
+        )
+        XCTAssertTrue(result.hasNext())
+        let tuple = try result.getNext()!
+        let id = try tuple.getValue(0) as! Int64
+        let email = try tuple.getValue(1) as! String
+        let name = try tuple.getValue(2) as! String
+        XCTAssertEqual(id, 1)
+        XCTAssertEqual(email, "ali@test.com")
+        XCTAssertEqual(name, "Ali")
+        XCTAssertFalse(result.hasNext(), "Should return exactly one result")
+
+        // Query for name (no index) should still work as full scan
+        let nameResult = try conn.query(
+            "MATCH (p:IdxScanTest) WHERE p.name = 'Veli' RETURN p.id"
+        )
+        XCTAssertTrue(nameResult.hasNext())
+        let nameTuple = try nameResult.getNext()!
+        let nameId = try nameTuple.getValue(0) as! Int64
+        XCTAssertEqual(nameId, 2)
+
+        try conn.dropHashIndex(table: "IdxScanTest", property: "email")
+    }
 }
