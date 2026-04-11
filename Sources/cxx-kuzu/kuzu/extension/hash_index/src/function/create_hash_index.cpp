@@ -80,6 +80,7 @@ static void validateKeyType(PhysicalTypeID type) {
     case PhysicalTypeID::FLOAT:
     case PhysicalTypeID::DOUBLE:
     case PhysicalTypeID::STRING:
+    case PhysicalTypeID::BOOL:
         return;
     default:
         throw BinderException(
