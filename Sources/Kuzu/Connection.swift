@@ -660,6 +660,130 @@ public final class Connection: @unchecked Sendable {
         }
         return names
     }
+
+    // MARK: - Relationship Index Functions
+
+    /// Creates a hash index on a relationship table property.
+    /// - Parameters:
+    ///   - table: The name of the relationship table.
+    ///   - property: The name of the property to index.
+    /// - Throws: KuzuError if index creation fails.
+    public func createRelHashIndex(table: String, property: String) throws {
+        let result = try query("CALL CREATE_REL_HASH_INDEX('\(table)', '\(property)')")
+        result.close()
+    }
+
+    /// Creates a range index on a relationship table property.
+    /// - Parameters:
+    ///   - table: The name of the relationship table.
+    ///   - property: The name of the property to index.
+    /// - Throws: KuzuError if index creation fails.
+    public func createRelRangeIndex(table: String, property: String) throws {
+        let result = try query("CALL CREATE_REL_RANGE_INDEX('\(table)', '\(property)')")
+        result.close()
+    }
+
+    /// Looks up relationship internal IDs by an indexed property value.
+    /// - Parameters:
+    ///   - table: The name of the relationship table.
+    ///   - property: The name of the indexed property.
+    ///   - value: The string value to look up.
+    /// - Returns: An array of matching relationship offsets (UInt64).
+    /// - Throws: KuzuError if the lookup fails.
+    public func queryRelHash(table: String, property: String, value: String) throws -> [UInt64] {
+        let result = try query(
+            "CALL QUERY_REL_HASH_INDEX('\(table)', '\(property)', '\(value)') RETURN rel_id"
+        )
+        defer { result.close() }
+        var ids: [UInt64] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                let val = try tuple.getValue(0)
+                if let id = val as? KuzuInternalId {
+                    ids.append(id.offset)
+                } else if let id = val as? UInt64 {
+                    ids.append(id)
+                } else if let id = val as? Int64 {
+                    ids.append(UInt64(bitPattern: id))
+                }
+            }
+        }
+        return ids
+    }
+
+    /// Queries a range index on a relationship table for rel IDs matching bounds.
+    /// - Parameters:
+    ///   - table: The name of the relationship table.
+    ///   - property: The name of the indexed property.
+    ///   - min: The minimum value (inclusive). Pass nil for no lower bound.
+    ///   - max: The maximum value (inclusive). Pass nil for no upper bound.
+    /// - Returns: An array of matching relationship offsets (UInt64).
+    /// - Throws: KuzuError if the query fails.
+    public func queryRelRange(table: String, property: String, min: String? = nil, max: String? = nil) throws -> [UInt64] {
+        let minStr = min ?? ""
+        let maxStr = max ?? ""
+        let result = try query(
+            "CALL QUERY_REL_RANGE_INDEX('\(table)', '\(property)', '\(minStr)', '\(maxStr)') RETURN rel_id"
+        )
+        defer { result.close() }
+        var ids: [UInt64] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                let val = try tuple.getValue(0)
+                if let id = val as? KuzuInternalId {
+                    ids.append(id.offset)
+                } else if let id = val as? UInt64 {
+                    ids.append(id)
+                } else if let id = val as? Int64 {
+                    ids.append(UInt64(bitPattern: id))
+                }
+            }
+        }
+        return ids
+    }
+
+    /// Drops an index from a relationship table.
+    /// - Parameters:
+    ///   - table: The name of the relationship table.
+    ///   - property: The name of the indexed property.
+    /// - Throws: KuzuError if dropping the index fails.
+    public func dropRelIndex(table: String, property: String) throws {
+        let result = try query("CALL DROP_REL_INDEX('\(table)', '\(property)')")
+        result.close()
+    }
+
+    /// Checks whether any index exists on the given relationship table property.
+    /// - Parameters:
+    ///   - table: The name of the relationship table.
+    ///   - property: The name of the property to check.
+    /// - Returns: `true` if an index exists on the property, `false` otherwise.
+    /// - Throws: KuzuError if the check fails.
+    public func hasRelIndex(table: String, property: String) throws -> Bool {
+        let indexes = try listRelIndexes(table: table)
+        return indexes.contains(where: { $0.name == property })
+    }
+
+    /// Lists all indexes on a relationship table.
+    /// - Parameter table: The name of the relationship table.
+    /// - Returns: An array of (name, type) tuples for all indexes.
+    /// - Throws: KuzuError if the query fails.
+    public func listRelIndexes(table: String) throws -> [(name: String, type: String)] {
+        let result = try query(
+            "CALL LIST_REL_INDEXES('\(table)') RETURN index_name, index_type"
+        )
+        defer { result.close() }
+        var indexes: [(name: String, type: String)] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                let name = try tuple.getValue(0)
+                let type = try tuple.getValue(1)
+                if let n = name as? String, let t = type as? String {
+                    indexes.append((name: n, type: t))
+                }
+            }
+        }
+        return indexes
+    }
 }
 
 /// Search result from a vector index KNN query.

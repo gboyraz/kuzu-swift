@@ -25,6 +25,16 @@ struct ListRangeIndexesFunction final {
     static function::function_set getFunctionSet();
 };
 
+struct CreateRelRangeIndexFunction final {
+    static constexpr const char* name = "CREATE_REL_RANGE_INDEX";
+    static function::function_set getFunctionSet();
+};
+
+struct QueryRelRangeIndexFunction final {
+    static constexpr const char* name = "QUERY_REL_RANGE_INDEX";
+    static function::function_set getFunctionSet();
+};
+
 } // namespace range_index_extension
 } // namespace kuzu
 

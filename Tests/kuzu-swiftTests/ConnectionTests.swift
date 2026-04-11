@@ -1888,4 +1888,182 @@ final class ConnectionTests: XCTestCase {
         XCTAssertFalse(notCreated)
         try conn.dropUniqueIndex(table: "UniqueIfNot", property: "email")
     }
+
+    // MARK: - Relationship Index Tests
+
+    private func makeRelTestDb() throws -> (Database, Connection) {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+        _ = try conn.query("CREATE NODE TABLE Account(id INT64, name STRING, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE REL TABLE TRANSFER(FROM Account TO Account, amount INT64, label STRING)")
+        _ = try conn.query("CREATE (:Account {id: 1, name: 'Alice'})")
+        _ = try conn.query("CREATE (:Account {id: 2, name: 'Bob'})")
+        _ = try conn.query("CREATE (:Account {id: 3, name: 'Carol'})")
+        _ = try conn.query("MATCH (a:Account), (b:Account) WHERE a.id = 1 AND b.id = 2 CREATE (a)-[:TRANSFER {amount: 100, label: 'payment'}]->(b)")
+        _ = try conn.query("MATCH (a:Account), (b:Account) WHERE a.id = 2 AND b.id = 3 CREATE (a)-[:TRANSFER {amount: 200, label: 'refund'}]->(b)")
+        _ = try conn.query("MATCH (a:Account), (b:Account) WHERE a.id = 1 AND b.id = 3 CREATE (a)-[:TRANSFER {amount: 100, label: 'payment'}]->(b)")
+        _ = try conn.query("MATCH (a:Account), (b:Account) WHERE a.id = 3 AND b.id = 1 CREATE (a)-[:TRANSFER {amount: 50, label: 'tip'}]->(b)")
+        return (memDb, conn)
+    }
+
+    func testRelHashIndexCreateAndLookup() throws {
+        let (_, conn) = try makeRelTestDb()
+        try conn.createRelHashIndex(table: "TRANSFER", property: "amount")
+        // Lookup amount=100 — should find 2 rels
+        let results = try conn.queryRelHash(table: "TRANSFER", property: "amount", value: "100")
+        XCTAssertEqual(results.count, 2, "Should find 2 rels with amount=100")
+        // Lookup amount=200 — should find 1 rel
+        let results200 = try conn.queryRelHash(table: "TRANSFER", property: "amount", value: "200")
+        XCTAssertEqual(results200.count, 1, "Should find 1 rel with amount=200")
+        try conn.dropRelIndex(table: "TRANSFER", property: "amount")
+    }
+
+    func testRelRangeIndexCreateAndQuery() throws {
+        let (_, conn) = try makeRelTestDb()
+        try conn.createRelRangeIndex(table: "TRANSFER", property: "amount")
+        // Range 50..100 — should find 3 rels (50, 100, 100)
+        let results = try conn.queryRelRange(table: "TRANSFER", property: "amount", min: "50", max: "100")
+        XCTAssertEqual(results.count, 3, "Should find 3 rels with amount 50..100")
+        try conn.dropRelIndex(table: "TRANSFER", property: "amount")
+    }
+
+    func testRelRangeIndexHalfOpen() throws {
+        let (_, conn) = try makeRelTestDb()
+        try conn.createRelRangeIndex(table: "TRANSFER", property: "amount")
+        // amount >= 100
+        let results = try conn.queryRelRange(table: "TRANSFER", property: "amount", min: "100")
+        XCTAssertEqual(results.count, 3, "Should find 3 rels with amount >= 100")
+        // amount <= 100
+        let results2 = try conn.queryRelRange(table: "TRANSFER", property: "amount", max: "100")
+        XCTAssertEqual(results2.count, 3, "Should find 3 rels with amount <= 100")
+        try conn.dropRelIndex(table: "TRANSFER", property: "amount")
+    }
+
+    func testRelHashIndexEmptyResult() throws {
+        let (_, conn) = try makeRelTestDb()
+        try conn.createRelHashIndex(table: "TRANSFER", property: "amount")
+        let results = try conn.queryRelHash(table: "TRANSFER", property: "amount", value: "999")
+        XCTAssertEqual(results.count, 0, "Should find no rels with amount=999")
+        try conn.dropRelIndex(table: "TRANSFER", property: "amount")
+    }
+
+    func testRelHashIndexNonUnique() throws {
+        let (_, conn) = try makeRelTestDb()
+        try conn.createRelHashIndex(table: "TRANSFER", property: "label")
+        // 'payment' appears twice
+        let results = try conn.queryRelHash(table: "TRANSFER", property: "label", value: "payment")
+        XCTAssertEqual(results.count, 2, "Should find 2 rels with label='payment'")
+        try conn.dropRelIndex(table: "TRANSFER", property: "label")
+    }
+
+    func testRelIndexDrop() throws {
+        let (_, conn) = try makeRelTestDb()
+        try conn.createRelHashIndex(table: "TRANSFER", property: "amount")
+        XCTAssertTrue(try conn.hasRelIndex(table: "TRANSFER", property: "amount"))
+        try conn.dropRelIndex(table: "TRANSFER", property: "amount")
+        XCTAssertFalse(try conn.hasRelIndex(table: "TRANSFER", property: "amount"))
+    }
+
+    func testRelIndexList() throws {
+        let (_, conn) = try makeRelTestDb()
+        try conn.createRelHashIndex(table: "TRANSFER", property: "amount")
+        try conn.createRelRangeIndex(table: "TRANSFER", property: "label")
+        let indexes = try conn.listRelIndexes(table: "TRANSFER")
+        XCTAssertEqual(indexes.count, 2)
+        let names = indexes.map { $0.name }.sorted()
+        XCTAssertEqual(names, ["amount", "label"])
+        try conn.dropRelIndex(table: "TRANSFER", property: "amount")
+        try conn.dropRelIndex(table: "TRANSFER", property: "label")
+    }
+
+    func testRelHashIndexEmptyTable() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+        _ = try conn.query("CREATE NODE TABLE EmptyNode(id INT64, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE REL TABLE EMPTY_REL(FROM EmptyNode TO EmptyNode, val INT64)")
+        try conn.createRelHashIndex(table: "EMPTY_REL", property: "val")
+        let results = try conn.queryRelHash(table: "EMPTY_REL", property: "val", value: "42")
+        XCTAssertEqual(results.count, 0, "Empty rel table should return no results")
+        try conn.dropRelIndex(table: "EMPTY_REL", property: "val")
+    }
+
+    func testRelIndexPersistence() throws {
+        let dbPath = NSTemporaryDirectory() + "kuzu_rel_idx_persist_" + UUID().uuidString
+        defer { try? FileManager.default.removeItem(atPath: dbPath) }
+
+        let config = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 1,
+            autoCheckpoint: true
+        )
+
+        // Phase 1: Create table, data, index
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            _ = try conn.query("CREATE NODE TABLE PersistAccount(id INT64, PRIMARY KEY(id))")
+            _ = try conn.query("CREATE REL TABLE PERSIST_TRANSFER(FROM PersistAccount TO PersistAccount, amount INT64)")
+            _ = try conn.query("CREATE (:PersistAccount {id: 1})")
+            _ = try conn.query("CREATE (:PersistAccount {id: 2})")
+            _ = try conn.query("MATCH (a:PersistAccount), (b:PersistAccount) WHERE a.id = 1 AND b.id = 2 CREATE (a)-[:PERSIST_TRANSFER {amount: 500}]->(b)")
+            try conn.createRelHashIndex(table: "PERSIST_TRANSFER", property: "amount")
+            let r = try conn.queryRelHash(table: "PERSIST_TRANSFER", property: "amount", value: "500")
+            XCTAssertEqual(r.count, 1, "Should find 1 rel before close")
+        }
+
+        // Phase 2: Reopen and verify
+        do {
+            let diskDb = try Database(dbPath, config)
+            let conn = try Connection(diskDb)
+            let has = try conn.hasRelIndex(table: "PERSIST_TRANSFER", property: "amount")
+            XCTAssertTrue(has, "Rel index should exist after reopen")
+            let r = try conn.queryRelHash(table: "PERSIST_TRANSFER", property: "amount", value: "500")
+            XCTAssertEqual(r.count, 1, "Should find 1 rel after reopen")
+        }
+    }
+
+    func testRelIndexMultipleRelTypes() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+        _ = try conn.query("CREATE NODE TABLE MultiNode(id INT64, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE REL TABLE REL_A(FROM MultiNode TO MultiNode, score INT64)")
+        _ = try conn.query("CREATE REL TABLE REL_B(FROM MultiNode TO MultiNode, score INT64)")
+        _ = try conn.query("CREATE (:MultiNode {id: 1})")
+        _ = try conn.query("CREATE (:MultiNode {id: 2})")
+        _ = try conn.query("MATCH (a:MultiNode), (b:MultiNode) WHERE a.id = 1 AND b.id = 2 CREATE (a)-[:REL_A {score: 10}]->(b)")
+        _ = try conn.query("MATCH (a:MultiNode), (b:MultiNode) WHERE a.id = 1 AND b.id = 2 CREATE (a)-[:REL_B {score: 10}]->(b)")
+        // Index on both
+        try conn.createRelHashIndex(table: "REL_A", property: "score")
+        try conn.createRelHashIndex(table: "REL_B", property: "score")
+        let rA = try conn.queryRelHash(table: "REL_A", property: "score", value: "10")
+        XCTAssertEqual(rA.count, 1)
+        let rB = try conn.queryRelHash(table: "REL_B", property: "score", value: "10")
+        XCTAssertEqual(rB.count, 1)
+        try conn.dropRelIndex(table: "REL_A", property: "score")
+        try conn.dropRelIndex(table: "REL_B", property: "score")
+    }
 }

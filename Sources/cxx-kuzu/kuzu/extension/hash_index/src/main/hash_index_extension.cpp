@@ -2,14 +2,17 @@
 
 #include "catalog/catalog.h"
 #include "catalog/catalog_entry/index_catalog_entry.h"
+#include "catalog/catalog_entry/rel_group_catalog_entry.h"
 #include "catalog/catalog_entry/table_catalog_entry.h"
 #include "extension/extension.h"
 #include "function/hash_index_functions.h"
 #include "index/secondary_hash_index.h"
 #include "main/client_context.h"
+#include "main/connection.h"
 #include "main/database.h"
 #include "storage/storage_manager.h"
 #include "storage/table/node_table.h"
+#include "storage/table/rel_table.h"
 
 namespace kuzu {
 namespace hash_index_extension {
@@ -149,6 +152,70 @@ static void rebuildIndex(main::ClientContext* context, storage::StorageManager* 
     }
 }
 
+static void rebuildRelIndex(main::ClientContext* context,
+    storage::StorageManager* storageManager, catalog::IndexCatalogEntry* indexEntry) {
+    auto* catalog = context->getCatalog();
+    auto* transaction = context->getTransaction();
+    auto tableID = indexEntry->getTableID();
+    auto* tableEntry = catalog->getTableCatalogEntry(transaction, tableID);
+    auto& relGroupEntry = tableEntry->constCast<catalog::RelGroupCatalogEntry>();
+    auto innerOid = relGroupEntry.getSingleRelEntryInfo().oid;
+    auto& relTable = storageManager->getTable(innerOid)->cast<storage::RelTable>();
+    auto propertyName = indexEntry->getIndexName();
+    if (!tableEntry->containsProperty(propertyName)) return;
+    auto columnID = tableEntry->getColumnID(propertyName);
+    auto keyType = tableEntry->getProperty(propertyName).getType().getPhysicalType();
+    auto logicalType = tableEntry->getProperty(propertyName).getType().copy();
+    auto hashType = SecondaryHashIndex::getIndexType();
+    storage::IndexInfo indexInfo{propertyName, hashType.typeName, tableID,
+        {columnID}, {keyType},
+        hashType.constraintType == storage::IndexConstraintType::PRIMARY,
+        hashType.definitionType == storage::IndexDefinitionType::BUILTIN};
+    auto storageInfoPtr = std::make_unique<SecondaryHashIndexStorageInfo>(0, columnID);
+    auto index = std::make_unique<SecondaryHashIndex>(
+        std::move(indexInfo), std::move(storageInfoPtr));
+    // Scan rel table data using Cypher
+    auto* db = context->getDatabase();
+    main::Connection conn(db);
+    auto query = common::stringFormat(
+        "MATCH ()-[r:`{}`]->() RETURN id(r), r.`{}`", tableEntry->getName(), propertyName);
+    auto result = conn.query(query);
+    if (result->isSuccess()) {
+        auto* mm = context->getMemoryManager();
+        auto relIDVector = std::make_unique<common::ValueVector>(
+            common::LogicalType::INTERNAL_ID(), mm);
+        auto propVector = std::make_unique<common::ValueVector>(logicalType.copy(), mm);
+        auto state = std::make_shared<common::DataChunkState>();
+        relIDVector->setState(state);
+        propVector->setState(state);
+        auto insertState = index->initInsertState(context, nullptr);
+        const uint32_t batchSize = 2048;
+        uint32_t batchIdx = 0;
+        while (result->hasNext()) {
+            auto tuple = result->getNext();
+            auto* relIdVal = tuple->getValue(0);
+            auto* propVal = tuple->getValue(1);
+            if (propVal->isNull()) continue;
+            relIDVector->copyFromValue(batchIdx, *relIdVal);
+            propVector->copyFromValue(batchIdx, *propVal);
+            propVector->setNull(batchIdx, false);
+            batchIdx++;
+            if (batchIdx >= batchSize) {
+                state->getSelVectorUnsafe().setToUnfiltered(batchIdx);
+                std::vector<common::ValueVector*> indexVectors{propVector.get()};
+                index->insert(transaction, *relIDVector, indexVectors, *insertState);
+                batchIdx = 0;
+            }
+        }
+        if (batchIdx > 0) {
+            state->getSelVectorUnsafe().setToUnfiltered(batchIdx);
+            std::vector<common::ValueVector*> indexVectors{propVector.get()};
+            index->insert(transaction, *relIDVector, indexVectors, *insertState);
+        }
+    }
+    relTable.addIndex(std::move(index));
+}
+
 static void initHashIndexEntries(main::ClientContext* context) {
     auto* storageManager = context->getStorageManager();
     if (!storageManager) {
@@ -171,15 +238,31 @@ static void initHashIndexEntries(main::ClientContext* context) {
         if (!indexEntry->isLoaded()) {
             indexEntry->setAuxInfo(std::make_unique<HashIndexAuxInfo>(isUniqueIdx));
         }
-        auto& nodeTable =
-            storageManager->getTable(indexEntry->getTableID())->cast<storage::NodeTable>();
-        auto optionalIndex = nodeTable.getIndexHolder(indexEntry->getIndexName());
-        if (optionalIndex.has_value()) {
-            if (!optionalIndex.value().get().isLoaded()) {
-                optionalIndex.value().get().load(context, storageManager);
+        // Check if this is a rel table index
+        auto* tableEntry = catalog->getTableCatalogEntry(transaction, indexEntry->getTableID());
+        if (tableEntry->getType() == catalog::CatalogEntryType::REL_GROUP_ENTRY) {
+            auto& relGroupEntry = tableEntry->constCast<catalog::RelGroupCatalogEntry>();
+            auto innerOid = relGroupEntry.getSingleRelEntryInfo().oid;
+            auto& relTable = storageManager->getTable(innerOid)->cast<storage::RelTable>();
+            auto optionalIndex = relTable.getIndexHolder(indexEntry->getIndexName());
+            if (optionalIndex.has_value()) {
+                if (!optionalIndex.value().get().isLoaded()) {
+                    optionalIndex.value().get().load(context, storageManager);
+                }
+            } else {
+                rebuildRelIndex(context, storageManager, indexEntry);
             }
         } else {
-            rebuildIndex(context, storageManager, indexEntry, isUniqueIdx);
+            auto& nodeTable =
+                storageManager->getTable(indexEntry->getTableID())->cast<storage::NodeTable>();
+            auto optionalIndex = nodeTable.getIndexHolder(indexEntry->getIndexName());
+            if (optionalIndex.has_value()) {
+                if (!optionalIndex.value().get().isLoaded()) {
+                    optionalIndex.value().get().load(context, storageManager);
+                }
+            } else {
+                rebuildIndex(context, storageManager, indexEntry, isUniqueIdx);
+            }
         }
     }
 }
@@ -194,6 +277,11 @@ void HashIndexExtension::load(main::ClientContext* context) {
     extension::ExtensionUtils::addStandaloneTableFunc<DropUniqueIndexFunction>(db);
     extension::ExtensionUtils::addTableFunc<QueryUniqueIndexFunction>(db);
     extension::ExtensionUtils::addTableFunc<ListUniqueIndexesFunction>(db);
+    // Rel index functions
+    extension::ExtensionUtils::addStandaloneTableFunc<CreateRelHashIndexFunction>(db);
+    extension::ExtensionUtils::addTableFunc<QueryRelHashIndexFunction>(db);
+    extension::ExtensionUtils::addStandaloneTableFunc<DropRelIndexFunction>(db);
+    extension::ExtensionUtils::addTableFunc<ListRelIndexesFunction>(db);
     extension::ExtensionUtils::registerIndexType(db, SecondaryHashIndex::getIndexType());
     extension::ExtensionUtils::registerIndexType(db, SecondaryHashIndex::getUniqueIndexType());
     initHashIndexEntries(context);

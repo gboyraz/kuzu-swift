@@ -45,6 +45,26 @@ struct ListUniqueIndexesFunction final {
     static function::function_set getFunctionSet();
 };
 
+struct CreateRelHashIndexFunction final {
+    static constexpr const char* name = "CREATE_REL_HASH_INDEX";
+    static function::function_set getFunctionSet();
+};
+
+struct QueryRelHashIndexFunction final {
+    static constexpr const char* name = "QUERY_REL_HASH_INDEX";
+    static function::function_set getFunctionSet();
+};
+
+struct DropRelIndexFunction final {
+    static constexpr const char* name = "DROP_REL_INDEX";
+    static function::function_set getFunctionSet();
+};
+
+struct ListRelIndexesFunction final {
+    static constexpr const char* name = "LIST_REL_INDEXES";
+    static function::function_set getFunctionSet();
+};
+
 } // namespace hash_index_extension
 } // namespace kuzu
 
