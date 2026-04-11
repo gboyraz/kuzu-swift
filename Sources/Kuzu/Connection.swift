@@ -282,4 +282,113 @@ public final class Connection: @unchecked Sendable {
         }
         return names
     }
+
+    // MARK: - HNSW Vector Index
+
+    /// Creates an HNSW vector index on an embedding column.
+    /// - Parameters:
+    ///   - table: Node table name (e.g., "Image").
+    ///   - indexName: Name for the index (e.g., "emb_idx").
+    ///   - property: Embedding column name (e.g., "embedding").
+    ///   - metric: Distance metric — "cosine", "l2", or "dotproduct" (default: "cosine").
+    /// - Throws: KuzuError if index creation fails.
+    public func createVectorIndex(
+        table: String,
+        indexName: String,
+        property: String,
+        metric: String = "cosine"
+    ) throws {
+        let result = try query(
+            "CALL CREATE_VECTOR_INDEX('\(table)', '\(indexName)', '\(property)', metric := '\(metric)')"
+        )
+        result.close()
+    }
+
+    /// Creates a vector index if one doesn't already exist. Safe to call on every app launch.
+    /// - Parameters:
+    ///   - table: Node table name.
+    ///   - indexName: Name for the index.
+    ///   - property: Embedding column name.
+    ///   - metric: Distance metric — "cosine", "l2", or "dotproduct" (default: "cosine").
+    /// - Returns: `true` if the index was created, `false` if it already existed.
+    /// - Throws: KuzuError if index creation fails for reasons other than the index already existing.
+    @discardableResult
+    public func createVectorIndexIfNotExists(
+        table: String,
+        indexName: String,
+        property: String,
+        metric: String = "cosine"
+    ) throws -> Bool {
+        do {
+            try createVectorIndex(table: table, indexName: indexName, property: property, metric: metric)
+            return true
+        } catch {
+            let msg = "\(error)"
+            if msg.contains("already exists") {
+                return false
+            }
+            throw error
+        }
+    }
+
+    /// Searches for K nearest neighbors using an HNSW vector index.
+    /// - Parameters:
+    ///   - table: Node table name.
+    ///   - indexName: Index name.
+    ///   - queryVector: The query embedding as a `[Float]` array.
+    ///   - k: Number of nearest neighbors to return.
+    ///   - filter: Optional Cypher filter (e.g., `"WHERE nn.collection_id = 5"`).
+    /// - Returns: Array of ``VectorSearchResult`` sorted by distance ascending.
+    /// - Throws: KuzuError if the query fails.
+    public func searchNearest(
+        table: String,
+        indexName: String,
+        queryVector: [Float],
+        k: Int,
+        filter: String? = nil
+    ) throws -> [VectorSearchResult] {
+        let vectorStr = "[" + queryVector.map { String($0) }.joined(separator: ",") + "]"
+
+        var cypher: String
+        if let filter = filter {
+            cypher = "CALL QUERY_VECTOR_INDEX('\(table)', '\(indexName)', CAST(\(vectorStr) AS FLOAT[\(queryVector.count)]), \(k), filter_statement := '\(filter)') YIELD node, distance RETURN node, distance ORDER BY distance ASC"
+        } else {
+            cypher = "CALL QUERY_VECTOR_INDEX('\(table)', '\(indexName)', CAST(\(vectorStr) AS FLOAT[\(queryVector.count)]), \(k)) YIELD node, distance RETURN node, distance ORDER BY distance ASC"
+        }
+
+        let result = try query(cypher)
+        defer { result.close() }
+
+        var results: [VectorSearchResult] = []
+        while result.hasNext() {
+            if let tuple = try result.getNext() {
+                // QUERY_VECTOR_INDEX yields node as a NODE and distance as DOUBLE
+                let distance = try tuple.getValue(1) as? Double ?? 0.0
+                if let node = try tuple.getValue(0) as? KuzuNode {
+                    results.append(VectorSearchResult(nodeID: node.id, distance: distance))
+                } else if let nodeID = try tuple.getValue(0) as? KuzuInternalId {
+                    results.append(VectorSearchResult(nodeID: nodeID, distance: distance))
+                }
+            }
+        }
+        return results
+    }
+
+    /// Drops an HNSW vector index.
+    /// - Parameters:
+    ///   - table: Node table name.
+    ///   - indexName: Index name.
+    /// - Throws: KuzuError if dropping the index fails.
+    public func dropVectorIndex(table: String, indexName: String) throws {
+        let result = try query("CALL DROP_VECTOR_INDEX('\(table)', '\(indexName)')")
+        result.close()
+    }
+}
+
+/// Search result from a vector index KNN query.
+public struct VectorSearchResult {
+    /// The internal ID of the matched node.
+    public let nodeID: KuzuInternalId
+    /// The distance from the query vector (lower is closer).
+    public let distance: Double
 }
