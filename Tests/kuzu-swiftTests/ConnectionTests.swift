@@ -2394,4 +2394,165 @@ final class ConnectionTests: XCTestCase {
         }
         XCTAssertEqual(names, ["Alice", "Charlie"], "Should return Alice and Charlie from IN clause")
     }
+
+    // MARK: - Typed Column Access Tests
+
+    func testTypedColumnAccess() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE TypeTest(id INT64, name STRING, score DOUBLE, active BOOL, PRIMARY KEY(id))"
+        )
+        _ = try conn.query(
+            "CREATE (:TypeTest {id: 1, name: 'Alice', score: 95.5, active: true})"
+        )
+        _ = try conn.query(
+            "CREATE (:TypeTest {id: 2, name: 'Bob', score: 87.3, active: false})"
+        )
+
+        // Test for-in with typed get (Sequence already works)
+        let result = try conn.query(
+            "MATCH (n:TypeTest) RETURN n.id, n.name, n.score, n.active ORDER BY n.id"
+        )
+        var names: [String] = []
+        for row in result {
+            let name: String = try row.get(1)
+            names.append(name)
+        }
+        XCTAssertEqual(names, ["Alice", "Bob"])
+
+        // Test typed access on single row
+        let result2 = try conn.query(
+            "MATCH (n:TypeTest) WHERE n.id = 1 RETURN n.id, n.name, n.score, n.active"
+        )
+        let row = try result2.getNext()!
+
+        // Int64 → Int auto-conversion
+        let id: Int = try row.get(0)
+        XCTAssertEqual(id, 1)
+
+        let name: String = try row.get(1)
+        XCTAssertEqual(name, "Alice")
+
+        let score: Double = try row.get(2)
+        XCTAssertEqual(score, 95.5)
+
+        let active: Bool = try row.get(3)
+        XCTAssertTrue(active)
+
+        // Test get with explicit type parameter
+        let nameExplicit: String = try row.get(1, as: String.self)
+        XCTAssertEqual(nameExplicit, "Alice")
+
+        // Test get by column name
+        let nameByCol: String = try row.get("n.name")
+        XCTAssertEqual(nameByCol, "Alice")
+
+        // Test getOptional
+        let opt: String? = row.getOptional(1)
+        XCTAssertEqual(opt, "Alice")
+
+        // Test getOptional by column name
+        let optByCol: Double? = row.getOptional("n.score")
+        XCTAssertEqual(optByCol, 95.5)
+    }
+
+    func testTypedColumnAccessNull() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE NullTest(id INT64, label STRING, PRIMARY KEY(id))"
+        )
+        _ = try conn.query("CREATE (:NullTest {id: 1})")  // label is NULL
+
+        let result = try conn.query("MATCH (n:NullTest) RETURN n.id, n.label")
+        let row = try result.getNext()!
+
+        // get<T> should throw for NULL
+        XCTAssertThrowsError(try { let _: String = try row.get(1) }())
+
+        // getOptional should return nil for NULL
+        let label: String? = row.getOptional(1)
+        XCTAssertNil(label)
+    }
+
+    func testTypedColumnAccessInvalidColumnName() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE ColNameTest(id INT64, PRIMARY KEY(id))"
+        )
+        _ = try conn.query("CREATE (:ColNameTest {id: 1})")
+
+        let result = try conn.query("MATCH (n:ColNameTest) RETURN n.id")
+        let row = try result.getNext()!
+
+        // get by non-existent column name should throw
+        XCTAssertThrowsError(try { let _: Int = try row.get("nonexistent") }())
+
+        // getOptional by non-existent column name should return nil
+        let opt: Int? = row.getOptional("nonexistent")
+        XCTAssertNil(opt)
+    }
+
+    // MARK: - AsyncSequence Tests
+
+    @available(macOS 10.15, iOS 13.0, *)
+    func testAsyncSequence() async throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        _ = try conn.query(
+            "CREATE NODE TABLE AsyncTest(id INT64, PRIMARY KEY(id))"
+        )
+        _ = try conn.query("CREATE (:AsyncTest {id: 1})")
+        _ = try conn.query("CREATE (:AsyncTest {id: 2})")
+        _ = try conn.query("CREATE (:AsyncTest {id: 3})")
+
+        let result = try conn.query(
+            "MATCH (n:AsyncTest) RETURN n.id ORDER BY n.id"
+        )
+
+        var ids: [Int] = []
+        for try await row in result.async {
+            let id: Int = try row.get(0)
+            ids.append(id)
+        }
+        XCTAssertEqual(ids, [1, 2, 3])
+    }
 }
