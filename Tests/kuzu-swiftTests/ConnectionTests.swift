@@ -2555,4 +2555,66 @@ final class ConnectionTests: XCTestCase {
         }
         XCTAssertEqual(ids, [1, 2, 3])
     }
+
+    func testRelationshipMerge() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        // Setup
+        _ = try conn.query("CREATE NODE TABLE MergePerson(id INT64, name STRING, PRIMARY KEY(id))")
+        _ = try conn.query("CREATE REL TABLE FOLLOWS(FROM MergePerson TO MergePerson, since INT64, weight DOUBLE)")
+        _ = try conn.query("CREATE (:MergePerson {id: 1, name: 'Alice'})")
+        _ = try conn.query("CREATE (:MergePerson {id: 2, name: 'Bob'})")
+        _ = try conn.query("CREATE (:MergePerson {id: 3, name: 'Carol'})")
+
+        // Test 1: MERGE creates new relationship
+        _ = try conn.query("""
+            MATCH (a:MergePerson {id: 1}), (b:MergePerson {id: 2})
+            MERGE (a)-[r:FOLLOWS]->(b)
+            ON CREATE SET r.since = 2024, r.weight = 1.0
+        """)
+        let r1 = try conn.query("MATCH (a:MergePerson {id: 1})-[r:FOLLOWS]->(b:MergePerson {id: 2}) RETURN r.since, r.weight")
+        XCTAssertTrue(r1.hasNext())
+        let row1 = try r1.getNext()!
+        XCTAssertEqual(try row1.getValue(0) as? Int64, 2024)
+        XCTAssertEqual(try row1.getValue(1) as? Double, 1.0)
+
+        // Test 2: MERGE matches existing — ON MATCH SET updates
+        _ = try conn.query("""
+            MATCH (a:MergePerson {id: 1}), (b:MergePerson {id: 2})
+            MERGE (a)-[r:FOLLOWS]->(b)
+            ON MATCH SET r.weight = 2.5
+        """)
+        let r2 = try conn.query("MATCH (a:MergePerson {id: 1})-[r:FOLLOWS]->(b:MergePerson {id: 2}) RETURN r.weight")
+        XCTAssertTrue(r2.hasNext())
+        let row2 = try r2.getNext()!
+        XCTAssertEqual(try row2.getValue(0) as? Double, 2.5)
+
+        // Test 3: MERGE creates second edge (different endpoints)
+        _ = try conn.query("""
+            MATCH (a:MergePerson {id: 2}), (b:MergePerson {id: 3})
+            MERGE (a)-[r:FOLLOWS]->(b)
+            ON CREATE SET r.since = 2025, r.weight = 0.5
+        """)
+        let countResult = try conn.query("MATCH ()-[r:FOLLOWS]->() RETURN count(r)")
+        let countRow = try countResult.getNext()!
+        XCTAssertEqual(try countRow.getValue(0) as? Int64, 2) // Should be 2 edges now
+
+        // Test 4: Full node+rel MERGE pattern (without preceding MATCH)
+        _ = try conn.query("""
+            MERGE (a:MergePerson {id: 1})-[r:FOLLOWS]->(b:MergePerson {id: 3})
+            ON CREATE SET r.since = 2026, r.weight = 3.0
+        """)
+        let r4 = try conn.query("MATCH ()-[r:FOLLOWS]->() RETURN count(r)")
+        let row4 = try r4.getNext()!
+        XCTAssertEqual(try row4.getValue(0) as? Int64, 3) // Should be 3 edges now
+    }
 }
