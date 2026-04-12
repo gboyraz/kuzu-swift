@@ -2267,4 +2267,51 @@ final class ConnectionTests: XCTestCase {
         XCTAssertTrue(results[1].distance < 0.5, "Second result should be close (updated B)")
         XCTAssertTrue(results[2].distance > 1.0, "Third result should be far (C=[0,0,1])")
     }
+
+    // MARK: - HNSW Bulk Insert with Shrink (Issue #66)
+
+    func testHNSWBulkInsertWithShrink() throws {
+        // This test exercises the shrinkForNode code path in HNSW index which calls
+        // detachDelete on FWD-only shadow rel tables. Before the fix, this would SIGABRT
+        // due to out-of-bounds access in LocalRelTable::delete_.
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let memDb = try Database(":memory:", systemConfig)
+        let conn = try Connection(memDb)
+
+        // Create table with 3-dim embedding
+        _ = try conn.query(
+            "CREATE NODE TABLE ShrinkTest(id INT64, embedding FLOAT[3], PRIMARY KEY(id))"
+        )
+
+        // Insert enough nodes to trigger shrinkForNode with small mu/ml
+        for i in 1...30 {
+            let x = Float(i) / 30.0
+            let y = Float(30 - i) / 30.0
+            let z = Float(i % 7) / 7.0
+            _ = try conn.query(
+                "CREATE (:ShrinkTest {id: \(i), embedding: [\(x), \(y), \(z)]})"
+            )
+        }
+
+        // Create HNSW index with small mu/ml to trigger shrink earlier
+        _ = try conn.query(
+            "CALL CREATE_VECTOR_INDEX('ShrinkTest', 'shrink_idx', 'embedding', metric := 'l2', mu := 4, ml := 4)"
+        )
+
+        // If we get here without SIGABRT, the fix works.
+        // Verify search still returns results.
+        let results = try conn.searchNearest(
+            table: "ShrinkTest", indexName: "shrink_idx",
+            queryVector: [1.0, 0.0, 0.0], k: 5
+        )
+        XCTAssertEqual(results.count, 5, "Should return 5 nearest neighbors")
+        XCTAssertTrue(results[0].distance <= results[1].distance, "Results should be sorted by distance")
+    }
 }
