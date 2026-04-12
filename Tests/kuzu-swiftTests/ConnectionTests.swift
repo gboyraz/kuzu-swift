@@ -2314,4 +2314,84 @@ final class ConnectionTests: XCTestCase {
         XCTAssertEqual(results.count, 5, "Should return 5 nearest neighbors")
         XCTAssertTrue(results[0].distance <= results[1].distance, "Results should be sorted by distance")
     }
+
+    // MARK: - Array Parameter Binding (Issues #44 and #45)
+
+    func testFloatArrayParameterBinding() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let db = try Database(":memory:", systemConfig)
+        let conn = try Connection(db)
+
+        _ = try conn.query("CREATE NODE TABLE Items(id INT64, embedding FLOAT[3], PRIMARY KEY(id))")
+
+        // Insert with string interpolation (known to work)
+        _ = try conn.query("CREATE (:Items {id: 1, embedding: [1.0, 0.0, 0.0]})")
+        _ = try conn.query("CREATE (:Items {id: 2, embedding: [0.0, 1.0, 0.0]})")
+
+        // Test 1: Bind [Float] as parameter for INSERT
+        let stmt = try conn.prepare("CREATE (:Items {id: $id, embedding: $vec})")
+        _ = try conn.execute(stmt, [
+            "id": Int64(3),
+            "vec": [Float(0.0), Float(0.0), Float(1.0)] as [Any],
+        ] as [String: Any?])
+
+        // Test 2: Bind [Float] as parameter for MATCH/WHERE
+        let stmt2 = try conn.prepare("MATCH (n:Items) WHERE n.embedding = $vec RETURN n.id ORDER BY n.id")
+        let result2 = try conn.execute(stmt2, [
+            "vec": [Float(1.0), Float(0.0), Float(0.0)] as [Any],
+        ] as [String: Any?])
+        XCTAssertTrue(result2.hasNext())
+        let tuple2 = try result2.getNext()!
+        let id2 = try tuple2.getValue(0) as! Int64
+        XCTAssertEqual(id2, 1, "Should find item with id=1 matching [1.0, 0.0, 0.0]")
+
+        // Test 3: Verify the parameterized INSERT actually worked
+        let stmt3 = try conn.prepare("MATCH (n:Items) WHERE n.embedding = $vec RETURN n.id")
+        let result3 = try conn.execute(stmt3, [
+            "vec": [Float(0.0), Float(0.0), Float(1.0)] as [Any],
+        ] as [String: Any?])
+        XCTAssertTrue(result3.hasNext())
+        let tuple3 = try result3.getNext()!
+        let id3 = try tuple3.getValue(0) as! Int64
+        XCTAssertEqual(id3, 3, "Should find item with id=3 inserted via parameter binding")
+    }
+
+    func testInClauseParameterBinding() throws {
+        let systemConfig = SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            maxNumThreads: 4,
+            enableCompression: true,
+            readOnly: false,
+            autoCheckpoint: true,
+            checkpointThreshold: UInt64.max
+        )
+        let db = try Database(":memory:", systemConfig)
+        let conn = try Connection(db)
+
+        _ = try conn.query("CREATE NODE TABLE People(name STRING, age INT64, PRIMARY KEY(name))")
+        _ = try conn.query("CREATE (:People {name: 'Alice', age: 30})")
+        _ = try conn.query("CREATE (:People {name: 'Bob', age: 25})")
+        _ = try conn.query("CREATE (:People {name: 'Charlie', age: 35})")
+
+        // Test: Bind [String] for IN clause
+        let stmt = try conn.prepare("MATCH (n:People) WHERE n.name IN $names RETURN n.name ORDER BY n.name")
+        let result = try conn.execute(stmt, [
+            "names": ["Alice", "Charlie"] as [Any],
+        ] as [String: Any?])
+
+        var names: [String] = []
+        while result.hasNext() {
+            let tuple = try result.getNext()!
+            let name = try tuple.getValue(0) as! String
+            names.append(name)
+        }
+        XCTAssertEqual(names, ["Alice", "Charlie"], "Should return Alice and Charlie from IN clause")
+    }
 }
