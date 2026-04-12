@@ -200,4 +200,45 @@ public final class QueryResult: CustomStringConvertible, Sequence, @unchecked
         kuzu_query_result_get_query_summary(&cQueryResult, &cQuerySummary)
         return kuzu_query_summary_get_execution_time(&cQuerySummary)
     }
+
+    /// Returns an AsyncSequence wrapper for async iteration.
+    ///
+    /// Usage:
+    /// ```swift
+    /// for try await row in result.async {
+    ///     let name: String = try row.get(0)
+    /// }
+    /// ```
+    @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+    public var async: AsyncQueryResultSequence {
+        return AsyncQueryResultSequence(self)
+    }
+}
+
+/// AsyncSequence wrapper for QueryResult, enabling `for try await` iteration.
+@available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+public struct AsyncQueryResultSequence: AsyncSequence {
+    public typealias Element = FlatTuple
+
+    private let queryResult: QueryResult
+
+    init(_ queryResult: QueryResult) {
+        self.queryResult = queryResult
+    }
+
+    public func makeAsyncIterator() -> AsyncIterator {
+        return AsyncIterator(queryResult)
+    }
+
+    public struct AsyncIterator: AsyncIteratorProtocol {
+        private let queryResult: QueryResult
+
+        init(_ queryResult: QueryResult) {
+            self.queryResult = queryResult
+        }
+
+        public mutating func next() async throws -> FlatTuple? {
+            return try queryResult.getNext()
+        }
+    }
 }
