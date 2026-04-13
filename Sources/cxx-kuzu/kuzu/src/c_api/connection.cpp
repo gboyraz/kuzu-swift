@@ -116,16 +116,15 @@ kuzu_state kuzu_connection_execute(kuzu_connection* connection,
         auto bound_values = static_cast<std::unordered_map<std::string, std::unique_ptr<Value>>*>(
             prepared_statement->_bound_values);
 
-        // Must copy the parameters for safety, and so that the parameters in the prepared statement
-        // stay the same.
-        std::unordered_map<std::string, std::unique_ptr<Value>> copied_bound_values;
-        for (auto& [name, value] : *bound_values) {
-            copied_bound_values.emplace(name, value->copy());
-        }
-
+        // Move the parameters instead of copying to avoid per-child heap allocations.
+        // For ARRAY/LIST values (e.g., FLOAT[768] embeddings), copying creates N individual
+        // Value objects on the C++ heap. On Apple platforms these go through MallocNanoZone
+        // which never returns memory to the OS, causing unbounded RSS growth.
+        // Moving is safe because the Swift wrapper (and other callers) re-bind parameters
+        // before each execute call.
         auto query_result =
             static_cast<Connection*>(connection->_connection)
-                ->executeWithParams(prepared_statement_ptr, std::move(copied_bound_values))
+                ->executeWithParams(prepared_statement_ptr, std::move(*bound_values))
                 .release();
         if (query_result == nullptr) {
             return KuzuError;

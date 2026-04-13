@@ -175,6 +175,28 @@ kuzu_value* kuzu_value_create_string(const char* val_) {
     return c_value;
 }
 
+kuzu_state kuzu_value_create_float_array(uint64_t num_elements, const float* buffer,
+    kuzu_value** out_value) {
+    if (num_elements == 0 || buffer == nullptr) {
+        return KuzuError;
+    }
+    try {
+        auto* c_value = (kuzu_value*)calloc(1, sizeof(kuzu_value));
+        std::vector<std::unique_ptr<Value>> children;
+        children.reserve(num_elements);
+        for (uint64_t i = 0; i < num_elements; ++i) {
+            children.push_back(std::make_unique<Value>(buffer[i]));
+        }
+        auto array_type = LogicalType::ARRAY(LogicalType::FLOAT(), num_elements);
+        c_value->_value = new Value(std::move(array_type), std::move(children));
+        c_value->_is_owned_by_cpp = false;
+        *out_value = c_value;
+        return KuzuSuccess;
+    } catch (Exception& e) {
+        return KuzuError;
+    }
+}
+
 kuzu_state kuzu_value_create_list(uint64_t num_elements, kuzu_value** elements,
     kuzu_value** out_value) {
     if (num_elements == 0) {

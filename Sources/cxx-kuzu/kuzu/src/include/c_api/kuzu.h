@@ -631,6 +631,18 @@ KUZU_C_API kuzu_state kuzu_prepared_statement_bind_string(
  */
 KUZU_C_API kuzu_state kuzu_prepared_statement_bind_value(
     kuzu_prepared_statement* prepared_statement, const char* param_name, kuzu_value* value);
+/**
+ * @brief Binds the given kuzu value to the given parameter name in the prepared statement,
+ * transferring ownership of the inner value. After this call, the kuzu_value's inner pointer
+ * is set to nullptr, so kuzu_value_destroy becomes a no-op (only frees the outer struct).
+ * This avoids copying child values for ARRAY/LIST types, reducing heap allocations.
+ * @param prepared_statement The prepared statement instance to bind the value.
+ * @param param_name The parameter name to bind the value.
+ * @param value The kuzu value to bind. Its inner value will be moved.
+ * @return The state indicating the success or failure of the operation.
+ */
+KUZU_C_API kuzu_state kuzu_prepared_statement_bind_value_move(
+    kuzu_prepared_statement* prepared_statement, const char* param_name, kuzu_value* value);
 
 // QueryResult
 /**
@@ -989,6 +1001,18 @@ KUZU_C_API kuzu_value* kuzu_value_create_string(const char* val_);
  * @return The state indicating the success or failure of the operation.
  */
 KUZU_C_API kuzu_state kuzu_value_create_list(uint64_t num_elements, kuzu_value** elements,
+    kuzu_value** out_value);
+/**
+ * @brief Creates an ARRAY(FLOAT, num_elements) value directly from a raw float buffer.
+ * This is a fast path that avoids creating individual kuzu_value objects for each element,
+ * significantly reducing heap allocations for embedding vectors.
+ * Caller is responsible for destroying the returned value.
+ * @param num_elements The number of float elements.
+ * @param buffer Pointer to the raw float buffer.
+ * @param[out] out_value The output parameter that will hold a pointer to the created array value.
+ * @return The state indicating the success or failure of the operation.
+ */
+KUZU_C_API kuzu_state kuzu_value_create_float_array(uint64_t num_elements, const float* buffer,
     kuzu_value** out_value);
 /**
  * @brief Creates a struct value with the given number of fields and the given field names and

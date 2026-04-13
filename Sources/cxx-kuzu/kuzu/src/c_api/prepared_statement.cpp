@@ -281,3 +281,22 @@ kuzu_state kuzu_prepared_statement_bind_value(kuzu_prepared_statement* prepared_
         return KuzuError;
     }
 }
+
+kuzu_state kuzu_prepared_statement_bind_value_move(kuzu_prepared_statement* prepared_statement,
+    const char* param_name, kuzu_value* value) {
+    if (value == nullptr || value->_value == nullptr) {
+        return KuzuError;
+    }
+    try {
+        // Transfer ownership of the inner Value to the prepared statement.
+        // This avoids copying N child Value objects for ARRAY/LIST types.
+        // After this call, value->_value is nullptr and kuzu_value_destroy becomes a no-op.
+        auto value_ptr = std::unique_ptr<Value>(static_cast<Value*>(value->_value));
+        value->_value = nullptr;
+        kuzu_prepared_statement_bind_cpp_value(prepared_statement, param_name,
+            std::move(value_ptr));
+        return KuzuSuccess;
+    } catch (Exception& e) {
+        return KuzuError;
+    }
+}

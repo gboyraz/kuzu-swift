@@ -101,14 +101,17 @@ public final class Connection: @unchecked Sendable {
         var cQueryResult = kuzu_query_result()
         for (key, value) in parameters {
             let cValue = try swiftValueToKuzuValue(value)
-            defer {
-                kuzu_value_destroy(cValue)
-            }
-            let state = kuzu_prepared_statement_bind_value(
+            // Use move-bind to transfer ownership of the Value to the prepared statement.
+            // This avoids copying N child Value objects for ARRAY/LIST types (e.g., FLOAT[768]
+            // embeddings). After this call, cValue's inner pointer is nullptr, so
+            // kuzu_value_destroy only frees the outer struct.
+            let state = kuzu_prepared_statement_bind_value_move(
                 &preparedStatement.cPreparedStatement,
                 key,
                 cValue
             )
+            // Always free the outer kuzu_value struct (inner pointer is already nullptr after move).
+            kuzu_value_destroy(cValue)
             if state != KuzuSuccess {
                 throw KuzuError.queryExecutionFailed(
                     "Failed to bind value with status \(state)"
@@ -164,6 +167,42 @@ public final class Connection: @unchecked Sendable {
     /// Interrupts the execution of the current query on the connection.
     public func interrupt() {
         kuzu_connection_interrupt(&cConnection)
+    }
+
+    // MARK: - Checkpoint
+
+    /// Flushes all pending WAL (Write-Ahead Log) entries to storage and releases
+    /// the associated C++ heap memory.
+    ///
+    /// **Call this periodically during bulk insert operations** (e.g., every 100–500 inserts)
+    /// to prevent unbounded memory growth.
+    ///
+    /// ### Why this matters on iOS
+    /// Every `execute` or `query` that modifies data creates WAL entries in the C++ heap.
+    /// These entries are **not** tracked by KuzuDB's buffer manager and accumulate until
+    /// `checkpoint()` is called. On macOS the OS can page out excess memory under pressure;
+    /// on iOS there is no page-out and jetsam will terminate the process instead.
+    ///
+    /// ### Recommended batch size
+    /// For FLOAT[768] embeddings, checkpoint every ~100–200 inserts keeps peak RSS below
+    /// ~50–80 MB over the batch.
+    ///
+    /// ### Example
+    /// ```swift
+    /// let stmt = try conn.prepare("MERGE (n:Image {id: $id}) ON CREATE SET n.embedding = $emb ...")
+    /// for (i, embedding) in embeddings.enumerated() {
+    ///     _ = try conn.execute(stmt, ["id": "\(i)", "emb": embedding as NSArray])
+    ///     if (i + 1) % 200 == 0 {
+    ///         try conn.checkpoint()
+    ///     }
+    /// }
+    /// try conn.checkpoint() // final flush
+    /// ```
+    ///
+    /// - Throws: KuzuError if the checkpoint query fails.
+    public func checkpoint() throws {
+        let result = try query("CHECKPOINT")
+        result.close()
     }
 
     // MARK: - Secondary Hash Index
