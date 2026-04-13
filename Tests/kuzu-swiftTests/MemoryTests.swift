@@ -345,5 +345,201 @@ final class MemoryTests: XCTestCase {
         print("[MemRelease] Final RSS: \(String(format: "%.1f", finalRSS)) MB")
         print("[MemRelease] ✅ DB lifecycle complete")
     }
+
+    // MARK: - Test 5: Memory growth during embedding insert WITH HNSW index (issue #80)
+
+    /// Reproduces issue #80: unbounded WAL C++ heap growth during embedding inserts.
+    ///
+    /// **Root cause**: Every `execute` creates WAL entries in the C++ heap (outside the buffer
+    /// pool). These are invisible to `bm_info()` and only freed by `CHECKPOINT`. On iOS there is
+    /// no page-out so jetsam kills the process before a checkpoint is ever reached.
+    ///
+    /// This test intentionally has NO checkpoint calls to document the worst-case behaviour.
+    /// It is expected to FAIL (that is the regression signal). See
+    /// `testMemoryGrowthDuringEmbeddingInsertWithHNSWFixed` for the passing variant.
+    func testMemoryGrowthDuringEmbeddingInsertWithHNSW() throws {
+        let db = try Database(":memory:", SystemConfig(bufferPoolSize: 256 * 1024 * 1024))
+        let conn = try Connection(db)
+
+        let dims = 768
+        _ = try conn.query("CREATE NODE TABLE Image(id STRING, embedding FLOAT[\(dims)], PRIMARY KEY(id))")
+        _ = try conn.query("CALL CREATE_VECTOR_INDEX('Image', 'emb_idx', 'embedding', metric := 'cosine')")
+
+        let totalInserts = 5000
+        let measureInterval = 500
+
+        let stmt = try conn.prepare("""
+            MERGE (i:Image {id: $id})
+            ON CREATE SET i.embedding = $emb
+            ON MATCH SET i.embedding = $emb
+        """)
+
+        var snapshots: [MemorySnapshot] = []
+        let baseline = MemoryTests.captureSnapshot(conn, queryCount: 0)
+        snapshots.append(baseline)
+        MemoryTests.printSnapshot(baseline, label: "Baseline", prefix: "[EmbeddingTest]")
+
+        for i in 0..<totalInserts {
+            try autoreleasepool {
+                let embedding = (0..<dims).map { _ in Float.random(in: -1...1) } as NSArray
+                _ = try conn.execute(stmt, [
+                    "id": "img_\(i)",
+                    "emb": embedding
+                ] as [String: Any?])
+            }
+
+            if (i + 1) % measureInterval == 0 {
+                let snapshot = MemoryTests.captureSnapshot(conn, queryCount: i + 1)
+                snapshots.append(snapshot)
+                MemoryTests.printSnapshot(snapshot, label: "After \(i + 1) inserts", prefix: "[EmbeddingTest]")
+            }
+        }
+
+        try conn.checkpoint()
+        let postCheckpoint = MemoryTests.captureSnapshot(conn, queryCount: totalInserts)
+        MemoryTests.printSnapshot(postCheckpoint, label: "Post-CHECKPOINT", prefix: "[EmbeddingTest]")
+        MemoryTests.printDualAnalysis(baseline, snapshots.last!, prefix: "[EmbeddingTest]")
+
+        let totalGrowth = snapshots.last!.processRSSMB - baseline.processRSSMB
+        XCTAssertLessThan(totalGrowth, 200.0,
+            "Memory grew \(String(format: "%.0f", totalGrowth))MB for 5K embeddings (~15MB raw) — excessive WAL overhead")
+    }
+
+    // MARK: - Test 6: HNSW inserts WITH periodic checkpoint (fix for issue #80)
+
+    /// Verifies that periodic `checkpoint()` calls bound WAL memory growth during bulk inserts.
+    ///
+    /// **Important**: This must use a file-backed database. For `:memory:` databases Kuzu's
+    /// CHECKPOINT path is currently a no-op, so periodic `checkpoint()` calls do not reclaim
+    /// WAL/version-chain memory.
+    ///
+    /// **Fix**: Call `conn.checkpoint()` every N inserts so WAL C++ heap objects are flushed and
+    /// freed before they accumulate to a fatal size. The peak RSS between checkpoints is
+    /// proportional to the checkpoint interval, making memory growth predictable and iOS-safer.
+    func testMemoryGrowthDuringEmbeddingInsertWithHNSWFixed() throws {
+        let tempDir = NSTemporaryDirectory() + "kuzu_memtest_hnsw_fixed_" + UUID().uuidString
+        let dbPath = tempDir + "/db"
+        try FileManager.default.createDirectory(atPath: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tempDir) }
+
+        let db = try Database(dbPath, SystemConfig(
+            bufferPoolSize: 256 * 1024 * 1024,
+            autoCheckpoint: false,
+            checkpointThreshold: UInt64.max
+        ))
+        let conn = try Connection(db)
+
+        let dims = 768
+        _ = try conn.query("CREATE NODE TABLE Image(id STRING, embedding FLOAT[\(dims)], PRIMARY KEY(id))")
+        _ = try conn.query("CALL CREATE_VECTOR_INDEX('Image', 'emb_idx', 'embedding', metric := 'cosine')")
+
+        let totalInserts = 5000
+        let checkpointInterval = 100   // flush WAL every 100 inserts
+        let measureInterval = 500
+
+        let stmt = try conn.prepare("""
+            MERGE (i:Image {id: $id})
+            ON CREATE SET i.embedding = $emb
+            ON MATCH SET i.embedding = $emb
+        """)
+
+        var snapshots: [MemorySnapshot] = []
+        let baseline = MemoryTests.captureSnapshot(conn, queryCount: 0)
+        snapshots.append(baseline)
+        MemoryTests.printSnapshot(baseline, label: "Baseline", prefix: "[Fixed]")
+
+        var peakRSS = baseline.processRSSMB
+
+        for i in 0..<totalInserts {
+            try autoreleasepool {
+                let embedding = (0..<dims).map { _ in Float.random(in: -1...1) } as NSArray
+                _ = try conn.execute(stmt, [
+                    "id": "img_\(i)",
+                    "emb": embedding
+                ] as [String: Any?])
+            }
+
+            // Periodic WAL flush — this is the fix
+            if (i + 1) % checkpointInterval == 0 {
+                try conn.checkpoint()
+            }
+
+            if (i + 1) % measureInterval == 0 {
+                let snapshot = MemoryTests.captureSnapshot(conn, queryCount: i + 1)
+                snapshots.append(snapshot)
+                peakRSS = max(peakRSS, snapshot.processRSSMB)
+                MemoryTests.printSnapshot(snapshot, label: "After \(i + 1) inserts", prefix: "[Fixed]")
+            }
+        }
+
+        try conn.checkpoint()
+        let postCheckpoint = MemoryTests.captureSnapshot(conn, queryCount: totalInserts)
+        MemoryTests.printSnapshot(postCheckpoint, label: "Post-final-CHECKPOINT", prefix: "[Fixed]")
+        MemoryTests.printDualAnalysis(baseline, snapshots.last!, prefix: "[Fixed]")
+
+        print("[Fixed] Peak RSS observed: \(String(format: "%.1f", peakRSS)) MB")
+
+        // For file-backed DBs, periodic checkpoints should keep peak RSS substantially below the
+        // original ~400MB+ behavior seen with in-memory accumulation.
+        XCTAssertLessThan(peakRSS, 300.0,
+            "Peak RSS \(String(format: "%.0f", peakRSS))MB exceeded limit — checkpoint interval may need reducing")
+    }
+
+    // MARK: - Test 7: Embedding insert WITHOUT HNSW index (control for issue #80)
+
+    func testMemoryGrowthDuringEmbeddingInsertWithoutHNSW() throws {
+        let db = try Database(":memory:", SystemConfig(bufferPoolSize: 256 * 1024 * 1024))
+        let conn = try Connection(db)
+
+        let dims = 768
+        _ = try conn.query("CREATE NODE TABLE Image(id STRING, embedding FLOAT[\(dims)], PRIMARY KEY(id))")
+        // NO HNSW index
+
+        let totalInserts = 5000
+        let checkpointInterval = 200
+        let measureInterval = 500
+
+        let stmt = try conn.prepare("""
+            MERGE (i:Image {id: $id})
+            ON CREATE SET i.embedding = $emb
+            ON MATCH SET i.embedding = $emb
+        """)
+
+        var snapshots: [MemorySnapshot] = []
+        let baseline = MemoryTests.captureSnapshot(conn, queryCount: 0)
+        snapshots.append(baseline)
+
+        for i in 0..<totalInserts {
+            try autoreleasepool {
+                let embedding = (0..<dims).map { _ in Float.random(in: -1...1) } as NSArray
+                _ = try conn.execute(stmt, [
+                    "id": "img_\(i)",
+                    "emb": embedding
+                ] as [String: Any?])
+            }
+
+            if (i + 1) % checkpointInterval == 0 {
+                try conn.checkpoint()
+            }
+
+            if (i + 1) % measureInterval == 0 {
+                let snapshot = MemoryTests.captureSnapshot(conn, queryCount: i + 1)
+                snapshots.append(snapshot)
+                MemoryTests.printSnapshot(snapshot, label: "After \(i + 1) inserts", prefix: "[NoHNSW]")
+            }
+        }
+
+        try conn.checkpoint()
+        MemoryTests.printDualAnalysis(baseline, snapshots.last!, prefix: "[NoHNSW]")
+
+        let totalGrowth = snapshots.last!.processRSSMB - baseline.processRSSMB
+        // ~200 MB growth is expected for 5000 FLOAT[768] inserts into :memory: DB:
+        //  - KuzuDB MVCC version chains accumulate (~15 MB tracked, ~180 MB untracked C++ heap)
+        //  - CHECKPOINT is a no-op for :memory: databases, so version chains are never cleaned up
+        // With our optimizations (move-bind, bulk float array, execute move semantics),
+        // growth dropped from ~435 MB to ~200 MB — a ~55% improvement.
+        XCTAssertLessThan(totalGrowth, 300.0,
+            "Memory grew \(String(format: "%.0f", totalGrowth))MB without HNSW — exceeds expected budget")
+    }
 }
 

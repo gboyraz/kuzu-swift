@@ -154,6 +154,47 @@ private func swiftArrayToKuzuList(_ array: NSArray)
             "Cannot convert empty array to Kuzu list"
         )
     }
+
+    // Fast path: if all elements are Float/NSNumber(float), use bulk float array API
+    // to avoid creating N individual kuzu_value objects (critical for embeddings).
+    if let firstElement = array[0] as? NSNumber,
+       String(cString: firstElement.objCType) == "f"
+    {
+        var floatBuffer = [Float]()
+        floatBuffer.reserveCapacity(numberOfElements)
+        for element in array {
+            guard let num = element as? NSNumber,
+                  String(cString: num.objCType) == "f"
+            else {
+                // Fall through to generic path if not all floats
+                return try swiftArrayToKuzuListGeneric(array)
+            }
+            floatBuffer.append(num.floatValue)
+        }
+        var cKuzuArrayValue: UnsafeMutablePointer<kuzu_value>?
+        let state = floatBuffer.withUnsafeBufferPointer { buf in
+            kuzu_value_create_float_array(
+                UInt64(numberOfElements),
+                buf.baseAddress,
+                &cKuzuArrayValue
+            )
+        }
+        if state != KuzuSuccess {
+            throw KuzuError.valueConversionFailed(
+                "Failed to create FLOAT ARRAY value with status: \(state)"
+            )
+        }
+        return cKuzuArrayValue!
+    }
+
+    return try swiftArrayToKuzuListGeneric(array)
+}
+
+/// Generic (non-optimized) path for converting a Swift array to a Kuzu list value.
+private func swiftArrayToKuzuListGeneric(_ array: NSArray)
+    throws -> UnsafeMutablePointer<kuzu_value>
+{
+    let numberOfElements = array.count
     let cElementArray: UnsafeMutablePointer<UnsafeMutablePointer<kuzu_value>?> =
         .allocate(capacity: numberOfElements)
     for idx in 0..<numberOfElements {
