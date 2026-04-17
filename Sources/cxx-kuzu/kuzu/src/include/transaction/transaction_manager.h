@@ -35,7 +35,8 @@ class TransactionManager {
 public:
     // Timestamp starts from 1. 0 is reserved for the dummy system transaction.
     explicit TransactionManager(storage::WAL& wal)
-        : wal{wal}, lastTransactionID{Transaction::START_TRANSACTION_ID}, lastTimestamp{1} {
+        : wal{wal}, lastTransactionID{Transaction::START_TRANSACTION_ID}, lastTimestamp{1},
+          numCommittedWriteTxnsSinceCheckpoint{0} {
         initCheckpointerFunc = initCheckpointer;
     }
 
@@ -49,6 +50,11 @@ public:
 private:
     bool hasNoActiveTransactions() const;
     void checkpointNoLock(main::ClientContext& clientContext);
+    // Secondary auto-checkpoint check: fires when the per-database transaction-count threshold
+    // (`DBConfig::checkpointAfterNTransactions`) is set and reached. Complements the WAL-size
+    // trigger in `Checkpointer::canAutoCheckpoint` for workloads where in-memory MVCC state
+    // grows faster than the WAL file.
+    bool shouldCheckpointOnTxnCountNoLock(const main::ClientContext& clientContext) const;
 
     // This functions locks the mutex to start new transactions.
     common::UniqLock stopNewTransactionsAndWaitUntilAllTransactionsLeave();
@@ -73,6 +79,9 @@ private:
     std::mutex mtxForSerializingPublicFunctionCalls;
     std::mutex mtxForStartingNewTransactions;
     uint64_t checkpointWaitTimeoutInMicros = common::DEFAULT_CHECKPOINT_WAIT_TIMEOUT_IN_MICROS;
+    // Incremented on every write-transaction commit, reset to 0 after any checkpoint
+    // (auto or manual). Protected by `mtxForSerializingPublicFunctionCalls`.
+    uint64_t numCommittedWriteTxnsSinceCheckpoint;
 
     init_checkpointer_func_t initCheckpointerFunc;
 };

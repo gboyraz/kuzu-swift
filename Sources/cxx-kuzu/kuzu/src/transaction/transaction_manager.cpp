@@ -63,11 +63,14 @@ void TransactionManager::commit(main::ClientContext& clientContext, Transaction*
         lastTimestamp++;
         transaction->commitTS = lastTimestamp;
         transaction->commit(&wal);
+        numCommittedWriteTxnsSinceCheckpoint++;
         auto shouldCheckpoint = transaction->shouldForceCheckpoint() ||
-                                Checkpointer::canAutoCheckpoint(clientContext, *transaction);
+                                Checkpointer::canAutoCheckpoint(clientContext, *transaction) ||
+                                shouldCheckpointOnTxnCountNoLock(clientContext);
         clearTransactionNoLock(transaction->getID());
         if (shouldCheckpoint) {
             checkpointNoLock(clientContext);
+            numCommittedWriteTxnsSinceCheckpoint = 0;
         }
     } break;
         // LCOV_EXCL_START
@@ -105,6 +108,19 @@ void TransactionManager::checkpoint(main::ClientContext& clientContext) {
         return;
     }
     checkpointNoLock(clientContext);
+    numCommittedWriteTxnsSinceCheckpoint = 0;
+}
+
+bool TransactionManager::shouldCheckpointOnTxnCountNoLock(
+    const main::ClientContext& clientContext) const {
+    if (clientContext.isInMemory()) {
+        return false;
+    }
+    if (!clientContext.getDBConfig()->autoCheckpoint) {
+        return false;
+    }
+    const auto threshold = clientContext.getDBConfig()->checkpointAfterNTransactions;
+    return threshold > 0 && numCommittedWriteTxnsSinceCheckpoint >= threshold;
 }
 
 UniqLock TransactionManager::stopNewTransactionsAndWaitUntilAllTransactionsLeave() {

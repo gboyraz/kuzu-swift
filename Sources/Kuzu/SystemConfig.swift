@@ -83,6 +83,12 @@ public final class SystemConfig: @unchecked Sendable {
     ///   - autoCheckpoint: Whether to automatically create checkpoints. Default is true.
     ///   - checkpointThreshold: The threshold for creating checkpoints. If set to UInt64.max, uses default value.
     ///   - maxDBSize: The maximum size of the database in bytes. If 0, uses platform default (4GB on iOS, system default elsewhere).
+    ///   - checkpointAfterNTransactions: Secondary auto-checkpoint trigger in write-transaction count.
+    ///     When > 0, auto-checkpoint fires once this many write transactions have committed since the
+    ///     last checkpoint, independent of WAL size. 0 (default) disables it. Useful on iOS for
+    ///     HNSW inserts and other rel-heavy workloads where in-memory MVCC state grows much faster
+    ///     than the WAL file, so the WAL-size threshold alone cannot bound RSS. Recommended value
+    ///     for iOS bulk ingest: 500–1000.
     public convenience init(
         bufferPoolSize: UInt64 = 0,
         maxNumThreads: UInt64 = 0,
@@ -92,7 +98,8 @@ public final class SystemConfig: @unchecked Sendable {
         checkpointThreshold: UInt64 = UInt64.max,
         maxDBSize: UInt64 = 0,
         adaptiveCheckpoint: Bool = true,
-        enableMemoryPressureHandling: Bool = true
+        enableMemoryPressureHandling: Bool = true,
+        checkpointAfterNTransactions: UInt64 = 0
     ) {
         self.init()
         if bufferPoolSize > 0 {
@@ -110,6 +117,7 @@ public final class SystemConfig: @unchecked Sendable {
         if maxDBSize > 0 {
             cSystemConfig.max_db_size = maxDBSize
         }
+        cSystemConfig.checkpoint_after_n_transactions = checkpointAfterNTransactions
         self.adaptiveCheckpoint = adaptiveCheckpoint
         self.enableMemoryPressureHandling = enableMemoryPressureHandling
     }
@@ -137,6 +145,7 @@ public final class SystemConfig: @unchecked Sendable {
             maxDBSize: UInt64 = 0,
             adaptiveCheckpoint: Bool = true,
             enableMemoryPressureHandling: Bool = true,
+            checkpointAfterNTransactions: UInt64 = 0,
             threadQoS: qos_class_t = QOS_CLASS_DEFAULT
         ) {
             self.init(
@@ -148,7 +157,8 @@ public final class SystemConfig: @unchecked Sendable {
                 checkpointThreshold: checkpointThreshold,
                 maxDBSize: maxDBSize,
                 adaptiveCheckpoint: adaptiveCheckpoint,
-                enableMemoryPressureHandling: enableMemoryPressureHandling
+                enableMemoryPressureHandling: enableMemoryPressureHandling,
+                checkpointAfterNTransactions: checkpointAfterNTransactions
             )
             self.cSystemConfig.thread_qos = threadQoS.rawValue
         }

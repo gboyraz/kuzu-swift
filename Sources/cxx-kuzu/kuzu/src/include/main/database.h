@@ -68,11 +68,16 @@ struct KUZU_API SystemConfig {
      * @param checkpointThreshold The threshold of the WAL file size in bytes. When the size of the
      * WAL file exceeds this threshold, the database will checkpoint if autoCheckpoint is true.
      * @param forceCheckpointOnClose If true, the database will force checkpoint when closing.
+     * @param checkpointAfterNTransactions Secondary auto-checkpoint trigger in write-transaction
+     * count. When > 0, an auto-checkpoint fires once this many write transactions have committed
+     * since the last checkpoint, independent of WAL size. 0 disables the trigger (default).
+     * Useful for workloads where in-memory MVCC state grows much faster than the WAL file
+     * (e.g. HNSW inserts, multi-edge MERGEs), so the WAL-size threshold alone can't bound RSS.
      */
     explicit SystemConfig(uint64_t bufferPoolSize = -1u, uint64_t maxNumThreads = 0,
         bool enableCompression = true, bool readOnly = false, uint64_t maxDBSize = -1u,
         bool autoCheckpoint = true, uint64_t checkpointThreshold = 16777216 /* 16MB */,
-        bool forceCheckpointOnClose = true
+        bool forceCheckpointOnClose = true, uint64_t checkpointAfterNTransactions = 0
 #if defined(__APPLE__)
         ,
         uint32_t threadQos = QOS_CLASS_DEFAULT
@@ -87,6 +92,7 @@ struct KUZU_API SystemConfig {
     bool autoCheckpoint;
     uint64_t checkpointThreshold;
     bool forceCheckpointOnClose;
+    uint64_t checkpointAfterNTransactions;
 #if defined(__APPLE__)
     uint32_t threadQos;
 #endif

@@ -541,5 +541,74 @@ final class MemoryTests: XCTestCase {
         XCTAssertLessThan(totalGrowth, 300.0,
             "Memory grew \(String(format: "%.0f", totalGrowth))MB without HNSW — exceeds expected budget")
     }
+
+    // MARK: - Test 8: HNSW + checkpointAfterNTransactions regression test (issue #80)
+    //
+    // Verifies that setting `checkpointAfterNTransactions` bounds peak RSS during HNSW
+    // bulk insert — the fix for issue #80. With this knob unset, peak RSS for this
+    // workload (3400 × FLOAT[768] MERGEs at iOS production config) climbs past 460 MB
+    // because `autoCheckpoint` only triggers on WAL file size and WAL grows ~22× slower
+    // than in-memory MVCC state for HNSW workloads (WAL ~9 KB/insert vs heap ~200 KB/insert).
+    // With `checkpointAfterNTransactions: 500` peak RSS stays under 180 MB — an empirical
+    // lower bound chosen with margin over the observed ~120 MB peak on macOS release.
+    func testCheckpointAfterNTransactionsBoundsPeakRSS() throws {
+        let tempDir = NSTemporaryDirectory() + "kuzu_issue80_" + UUID().uuidString
+        let dbPath = tempDir + "/db"
+        try FileManager.default.createDirectory(atPath: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tempDir) }
+
+        let db = try Database(dbPath, SystemConfig(
+            bufferPoolSize: 512 * 1024 * 1024,
+            autoCheckpoint: true,
+            checkpointThreshold: 64 * 1024 * 1024,
+            checkpointAfterNTransactions: 500
+        ))
+        let conn = try Connection(db)
+
+        let dims = 768
+        _ = try conn.query("CREATE NODE TABLE Image(id STRING, embedding FLOAT[\(dims)], PRIMARY KEY(id))")
+        _ = try conn.query("CALL CREATE_VECTOR_INDEX('Image', 'emb_idx', 'embedding', metric := 'cosine')")
+
+        let totalInserts = 3400
+        let measureInterval = 400
+
+        let stmt = try conn.prepare("""
+            MERGE (i:Image {id: $id})
+            ON CREATE SET i.embedding = $emb
+            ON MATCH SET i.embedding = $emb
+        """)
+
+        let baseline = MemoryTests.captureSnapshot(conn, queryCount: 0)
+        MemoryTests.printSnapshot(baseline, label: "Baseline", prefix: "[Issue80]")
+
+        var peakRSS = baseline.processRSSMB
+
+        for i in 0..<totalInserts {
+            try autoreleasepool {
+                let embedding = (0..<dims).map { _ in Float.random(in: -1...1) } as NSArray
+                _ = try conn.execute(stmt, [
+                    "id": "img_\(i)",
+                    "emb": embedding
+                ] as [String: Any?])
+            }
+
+            if (i + 1) % measureInterval == 0 {
+                let snapshot = MemoryTests.captureSnapshot(conn, queryCount: i + 1)
+                peakRSS = max(peakRSS, snapshot.processRSSMB)
+                MemoryTests.printSnapshot(snapshot, label: "After \(i + 1) inserts", prefix: "[Issue80]")
+            }
+        }
+
+        let finalSnapshot = MemoryTests.captureSnapshot(conn, queryCount: totalInserts)
+        peakRSS = max(peakRSS, finalSnapshot.processRSSMB)
+        MemoryTests.printDualAnalysis(baseline, finalSnapshot, prefix: "[Issue80]")
+        print("[Issue80] Peak RSS observed: \(String(format: "%.1f", peakRSS)) MB")
+
+        // Observed ~120 MB peak on macOS release with checkpointAfterNTransactions: 500.
+        // Assert < 200 MB with margin for CI variance. Without the fix peak is ~460 MB,
+        // so the gap is wide enough that this assertion is stable.
+        XCTAssertLessThan(peakRSS, 200.0,
+            "Peak RSS \(String(format: "%.0f", peakRSS)) MB exceeds bound — checkpointAfterNTransactions trigger may be regressed")
+    }
 }
 
