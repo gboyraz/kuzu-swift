@@ -154,6 +154,14 @@ void FloatCompression<T>::setValuesFromUncompressed(const uint8_t* srcBuffer,
                                  canUpdateInPlace(std::span(&value, 1), metadata, localUpdateState);
                       })));
 
+    // [issue #83] Values that can't round-trip through ALP (NaN, Inf, -0.0,
+    // |x| > ENCODING_UPPER_LIMIT) get encoded as the sentinel ENCODING_UPPER_LIMIT which
+    // falls outside the bitpacking range. Mirror the substitution logic already used in
+    // canUpdateInPlace: detect exceptions and replace their encoded value with
+    // bitpackingInfo.offset (a value known to fit the current bitpack metadata). The
+    // actual exception float is already tracked in the exception chunk by
+    // FloatColumnReadWriter::writeValuesToPage, so no data is lost.
+    const auto bitpackingInfo = getBitpackInfo(metadata);
     std::vector<EncodedType> integerEncodedValues(numValues);
     for (size_t i = 0; i < numValues; ++i) {
         const size_t posInSrc = i + srcOffset;
@@ -161,7 +169,11 @@ void FloatCompression<T>::setValuesFromUncompressed(const uint8_t* srcBuffer,
         const auto floatValue = reinterpret_cast<const T*>(srcBuffer)[posInSrc];
         const EncodedType encodedValue = alp::AlpEncode<T>::encode_value(floatValue,
             metadata.floatMetadata()->fac, metadata.floatMetadata()->exp);
-        integerEncodedValues[i] = encodedValue;
+        const T decodedValue = alp::AlpDecode<T>::decode_value(encodedValue,
+            metadata.floatMetadata()->fac, metadata.floatMetadata()->exp);
+        // NaN != NaN so the comparison below correctly flags NaN as an exception too.
+        integerEncodedValues[i] =
+            (floatValue != decodedValue) ? bitpackingInfo.offset : encodedValue;
     }
 
     getEncodedFloatBitpacker(metadata).setValuesFromUncompressed(

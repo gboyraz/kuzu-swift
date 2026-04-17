@@ -477,12 +477,17 @@ final class MemoryTests: XCTestCase {
         MemoryTests.printSnapshot(postCheckpoint, label: "Post-final-CHECKPOINT", prefix: "[Fixed]")
         MemoryTests.printDualAnalysis(baseline, snapshots.last!, prefix: "[Fixed]")
 
-        print("[Fixed] Peak RSS observed: \(String(format: "%.1f", peakRSS)) MB")
+        // Assert on peak GROWTH from this test's own baseline rather than absolute peak RSS.
+        // Absolute peak is contaminated by whatever prior tests left in the XCTest process
+        // (can be GBs when running the full `swift test` suite). Growth-from-baseline
+        // isolates the checkpoint interval's effect. Consistent with PR #84.
+        let peakGrowth = peakRSS - baseline.processRSSMB
+        print("[Fixed] Peak RSS observed: \(String(format: "%.1f", peakRSS)) MB  (growth from baseline: \(String(format: "%+.1f", peakGrowth)) MB)")
 
-        // For file-backed DBs, periodic checkpoints should keep peak RSS substantially below the
-        // original ~400MB+ behavior seen with in-memory accumulation.
-        XCTAssertLessThan(peakRSS, 300.0,
-            "Peak RSS \(String(format: "%.0f", peakRSS))MB exceeded limit — checkpoint interval may need reducing")
+        // For file-backed DBs with periodic checkpoints, growth from this test's baseline
+        // should stay well under 300 MB (observed ~100 MB in isolation).
+        XCTAssertLessThan(peakGrowth, 300.0,
+            "Peak RSS growth \(String(format: "%.0f", peakGrowth)) MB exceeded limit — checkpoint interval may need reducing")
     }
 
     // MARK: - Test 7: Embedding insert WITHOUT HNSW index (control for issue #80)
@@ -615,6 +620,92 @@ final class MemoryTests: XCTestCase {
         // well inside the gap for stability across runs + CI variance.
         XCTAssertLessThan(peakGrowth, 200.0,
             "Peak RSS growth \(String(format: "%.0f", peakGrowth)) MB exceeds bound — checkpointAfterNTransactions trigger may be regressed")
+    }
+
+    // MARK: - Test 9: #83 — NaN in ALP-compressed float column trips checkpoint
+    //
+    // Reproduces the iOS checkpoint assertion (compression.cpp:656 / node_group.cpp:637)
+    // that fires when a FLOAT column (ALP-compressed by default) receives NaN values
+    // and checkpoint runs on a chunk with NaN updates pending. iOS Vision framework
+    // returns NaN when metrics are unavailable; periodic checkpoint then hits the bug.
+    func testIssue83_NaNInCompressedFloatColumn() throws {
+        let tempDir = NSTemporaryDirectory() + "kuzu_issue83_nan_" + UUID().uuidString
+        let dbPath = tempDir + "/db"
+        try FileManager.default.createDirectory(atPath: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tempDir) }
+
+        let db = try Database(dbPath, SystemConfig(
+            bufferPoolSize: 128 * 1024 * 1024,
+            enableCompression: true,
+            autoCheckpoint: false,
+            checkpointThreshold: UInt64.max
+        ))
+        let conn = try Connection(db)
+
+        // Match iOS schema and flow more faithfully — multi-col Image table with HNSW index,
+        // MERGE inserts, updateVisionAnalysis-style multi-col UPDATE with NaN, checkpoint
+        // between 80-row batches.
+        _ = try conn.query("""
+            CREATE NODE TABLE Image (
+                id STRING,
+                timestamp FLOAT,
+                embedding FLOAT[16],
+                thumbnailPath STRING,
+                aestheticsScore FLOAT DEFAULT -999.0,
+                isUtility BOOLEAN DEFAULT false,
+                saliencyFocalX FLOAT DEFAULT -1.0,
+                saliencyFocalY FLOAT DEFAULT -1.0,
+                faceCount INT16 DEFAULT 0,
+                avgFaceQuality FLOAT DEFAULT -1.0,
+                poseCount INT16 DEFAULT 0,
+                PRIMARY KEY (id)
+            )
+        """)
+        _ = try conn.query("CALL CREATE_VECTOR_INDEX('Image', 'emb_idx', 'embedding', metric := 'cosine')")
+
+        let mergeStmt = try conn.prepare("""
+            MERGE (i:Image {id: $id})
+            ON CREATE SET i.timestamp = $ts, i.embedding = $emb, i.thumbnailPath = $thumb
+            ON MATCH SET i.embedding = $emb, i.timestamp = $ts, i.thumbnailPath = $thumb
+        """)
+        let visionStmt = try conn.prepare("""
+            MATCH (i:Image {id: $id})
+            SET i.aestheticsScore = $score, i.isUtility = $util,
+                i.saliencyFocalX = $fx, i.saliencyFocalY = $fy,
+                i.faceCount = $fc, i.avgFaceQuality = $aq, i.poseCount = $pc
+        """)
+
+        for batch in 0..<5 {
+            for i in 0..<80 {
+                let id = batch * 80 + i
+                let imgId = "img_\(id)"
+                let emb = (0..<16).map { _ in Float.random(in: -1...1) } as NSArray
+                _ = try conn.execute(mergeStmt, [
+                    "id": imgId, "ts": Float(id),
+                    "emb": emb, "thumb": "t_\(id).jpg"
+                ] as [String: Any?])
+                // Some images have NaN scores (metric unavailable)
+                let withNaN = id % 3 == 0
+                _ = try conn.execute(visionStmt, [
+                    "id": imgId,
+                    "score": withNaN ? Float.nan : Float.random(in: 0...1),
+                    "util": false,
+                    "fx": withNaN ? Float.nan : Float.random(in: 0...1),
+                    "fy": withNaN ? Float.nan : Float.random(in: 0...1),
+                    "fc": Int16(0),
+                    "aq": withNaN ? Float.nan : Float.random(in: 0...1),
+                    "pc": Int16(0)
+                ] as [String: Any?])
+            }
+            do {
+                try conn.checkpoint()
+                print("[Issue83-NaN] batch \(batch) checkpoint OK")
+            } catch {
+                XCTFail("[Issue83-NaN] batch \(batch) checkpoint failed: \(error)")
+                return
+            }
+        }
+        print("[Issue83-NaN] all 5 batches checkpointed cleanly — bug did NOT reproduce")
     }
 }
 
