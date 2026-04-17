@@ -64,6 +64,16 @@ struct DBConfig {
     bool autoCheckpoint;
     bool adaptiveCheckpoint;
     uint64_t checkpointThreshold;
+    // Secondary auto-checkpoint trigger, independent of WAL size.
+    // When > 0, an auto-checkpoint fires once this many write transactions have committed
+    // since the last checkpoint. 0 disables the trigger (WAL-size trigger still applies).
+    //
+    // Rationale: for rel-heavy workloads (HNSW inserts, multi-edge MERGEs) the in-memory
+    // MVCC state (UndoBuffer chains, VectorVersionInfo arrays, VectorUpdateInfo column
+    // chunks, LocalRelTable pre-allocations) grows much faster than the WAL file, so the
+    // WAL-size threshold alone cannot bound process memory. This knob lets applications
+    // with known transaction cadence (e.g. iOS bulk ingest) cap peak RSS predictably.
+    uint64_t checkpointAfterNTransactions;
     bool forceCheckpointOnClose;
     bool enableSpillingToDisk;
 #if defined(__APPLE__)

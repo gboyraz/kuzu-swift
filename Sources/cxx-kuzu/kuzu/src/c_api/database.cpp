@@ -10,7 +10,8 @@ kuzu_state kuzu_database_init(const char* database_path, kuzu_system_config conf
         std::string database_path_str = database_path;
         auto systemConfig = SystemConfig(config.buffer_pool_size, config.max_num_threads,
             config.enable_compression, config.read_only, config.max_db_size, config.auto_checkpoint,
-            config.checkpoint_threshold);
+            config.checkpoint_threshold, true /* forceCheckpointOnClose */,
+            config.checkpoint_after_n_transactions);
 
 #if defined(__APPLE__)
         systemConfig.threadQos = config.thread_qos;
@@ -49,6 +50,7 @@ kuzu_system_config kuzu_default_system_config() {
     cSystemConfig.max_db_size = config.maxDBSize;
     cSystemConfig.auto_checkpoint = config.autoCheckpoint;
     cSystemConfig.checkpoint_threshold = config.checkpointThreshold;
+    cSystemConfig.checkpoint_after_n_transactions = config.checkpointAfterNTransactions;
 #if defined(__APPLE__)
     cSystemConfig.thread_qos = config.threadQos;
 #endif

@@ -132,6 +132,12 @@ typedef struct {
     // The threshold of the WAL file size in bytes. When the size of the
     // WAL file exceeds this threshold, the database will checkpoint if auto_checkpoint is true.
     uint64_t checkpoint_threshold;
+    // Secondary auto-checkpoint trigger, independent of WAL size. When > 0, an auto-checkpoint
+    // fires once this many write transactions have committed since the last checkpoint.
+    // 0 (default) disables the trigger — only the WAL-size threshold applies.
+    // Use this for rel-heavy workloads (HNSW inserts, multi-edge MERGEs) where in-memory
+    // MVCC state grows much faster than the WAL file.
+    uint64_t checkpoint_after_n_transactions;
 
 #if defined(__APPLE__)
     // The thread quality of service (QoS) for the worker threads.
