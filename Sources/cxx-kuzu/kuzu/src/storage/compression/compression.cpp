@@ -647,6 +647,33 @@ void IntegerBitpacking<T>::setValuesFromUncompressed(const uint8_t* srcBuffer, o
     // non-zero offset However we don't care about the value stored for null values
     // Currently they will be mangled by storage+recovery (underflow in the subtraction
     // below)
+    // [DEBUG issue #83] Before asserting, identify and log the first value that can't fit.
+    {
+        offset_t firstBadIdx = posInSrc + numValues;
+        int64_t firstBadVal = 0;
+        offset_t badCount = 0;
+        for (offset_t i = posInSrc; i < posInSrc + numValues; ++i) {
+            auto value = reinterpret_cast<const T*>(srcBuffer)[i];
+            bool isNull = (nullMask && nullMask->isNull(i));
+            bool fits = isNull || canUpdateInPlace(std::span(&value, 1), metadata);
+            if (!fits) {
+                ++badCount;
+                if (firstBadIdx == posInSrc + numValues) {
+                    firstBadIdx = i;
+                    firstBadVal = (int64_t)value;
+                }
+            }
+        }
+        if (badCount != 0) {
+            fprintf(stderr,
+                "[KU83-COMPRESS] in-place update will FAIL: type=%s numValues=%llu posInSrc=%llu "
+                "badCount=%llu firstBadIdx=%llu firstBadVal=%lld posInDst=%llu\n",
+                typeid(T).name(),
+                (unsigned long long)numValues, (unsigned long long)posInSrc,
+                (unsigned long long)badCount, (unsigned long long)firstBadIdx,
+                (long long)firstBadVal, (unsigned long long)posInDst);
+        }
+    }
     KU_ASSERT(numValues == static_cast<offset_t>(std::ranges::count_if(
                                std::ranges::iota_view{posInSrc, posInSrc + numValues},
                                [srcBuffer, &metadata, nullMask](offset_t i) {

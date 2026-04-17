@@ -739,8 +739,33 @@ void OnDiskHNSWIndex::checkpoint(main::ClientContext* context,
     storage::PageAllocator& pageAllocator) {
     auto [nodeTableEntry, upperRelTableEntry, lowerRelTableEntry] = getIndexTableCatalogEntries(
         context->getCatalog(), &DUMMY_CHECKPOINT_TRANSACTION, indexInfo);
-    upperRelTable->checkpoint(context, upperRelTableEntry, pageAllocator);
-    lowerRelTable->checkpoint(context, lowerRelTableEntry, pageAllocator);
+    // [DEBUG issue #83] Log HNSW sub-table checkpoint boundaries.
+    fprintf(stderr, "[KU83-HNSW] OnDiskHNSWIndex::checkpoint ENTRY indexName=%s\n",
+        indexInfo.name.c_str());
+    try {
+        fprintf(stderr, "[KU83-HNSW]   upperRelTable checkpoint begin name=%s\n",
+            upperRelTableEntry->getName().c_str());
+        upperRelTable->checkpoint(context, upperRelTableEntry, pageAllocator);
+        fprintf(stderr, "[KU83-HNSW]   upperRelTable checkpoint  done name=%s OK\n",
+            upperRelTableEntry->getName().c_str());
+    } catch (std::exception& e) {
+        fprintf(stderr, "[KU83-HNSW]   upperRelTable checkpoint FAIL name=%s err=%s\n",
+            upperRelTableEntry->getName().c_str(), e.what());
+        throw;
+    }
+    try {
+        fprintf(stderr, "[KU83-HNSW]   lowerRelTable checkpoint begin name=%s\n",
+            lowerRelTableEntry->getName().c_str());
+        lowerRelTable->checkpoint(context, lowerRelTableEntry, pageAllocator);
+        fprintf(stderr, "[KU83-HNSW]   lowerRelTable checkpoint  done name=%s OK\n",
+            lowerRelTableEntry->getName().c_str());
+    } catch (std::exception& e) {
+        fprintf(stderr, "[KU83-HNSW]   lowerRelTable checkpoint FAIL name=%s err=%s\n",
+            lowerRelTableEntry->getName().c_str(), e.what());
+        throw;
+    }
+    fprintf(stderr, "[KU83-HNSW] OnDiskHNSWIndex::checkpoint EXIT indexName=%s\n",
+        indexInfo.name.c_str());
 }
 
 void OnDiskHNSWIndex::insertInternal(Transaction* transaction, common::offset_t offset,
