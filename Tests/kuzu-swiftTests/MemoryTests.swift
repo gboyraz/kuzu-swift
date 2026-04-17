@@ -602,13 +602,19 @@ final class MemoryTests: XCTestCase {
         let finalSnapshot = MemoryTests.captureSnapshot(conn, queryCount: totalInserts)
         peakRSS = max(peakRSS, finalSnapshot.processRSSMB)
         MemoryTests.printDualAnalysis(baseline, finalSnapshot, prefix: "[Issue80]")
-        print("[Issue80] Peak RSS observed: \(String(format: "%.1f", peakRSS)) MB")
 
-        // Observed ~120 MB peak on macOS release with checkpointAfterNTransactions: 500.
-        // Assert < 200 MB with margin for CI variance. Without the fix peak is ~460 MB,
-        // so the gap is wide enough that this assertion is stable.
-        XCTAssertLessThan(peakRSS, 200.0,
-            "Peak RSS \(String(format: "%.0f", peakRSS)) MB exceeds bound — checkpointAfterNTransactions trigger may be regressed")
+        // Assert on RSS GROWTH, not absolute peak. Absolute peak is contaminated by whatever
+        // memory previous tests in the same XCTest process left un-released (can be GBs when
+        // running the full `swift test` suite). Growth from this test's own baseline is what
+        // actually measures the checkpoint trigger's effectiveness.
+        let peakGrowth = peakRSS - baseline.processRSSMB
+        print("[Issue80] Peak RSS observed: \(String(format: "%.1f", peakRSS)) MB  (growth from baseline: \(String(format: "%+.1f", peakGrowth)) MB)")
+
+        // Observed ~90 MB peak growth on macOS release with checkpointAfterNTransactions: 500.
+        // Without the fix the growth is ~420 MB (see PR #82 baseline). 200 MB bound is
+        // well inside the gap for stability across runs + CI variance.
+        XCTAssertLessThan(peakGrowth, 200.0,
+            "Peak RSS growth \(String(format: "%.0f", peakGrowth)) MB exceeds bound — checkpointAfterNTransactions trigger may be regressed")
     }
 }
 
