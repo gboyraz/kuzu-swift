@@ -634,7 +634,23 @@ std::unique_ptr<ChunkedNodeGroup> NodeGroup::scanAllInsertedAndVersions(
     }
     for (auto i = 0u; i < columnIDs.size(); i++) {
         if (columnIDs[i] != 0) {
-            KU_ASSERT(numResidentRows == mergedInMemGroup->getColumnChunk(i).getNumValues());
+            // [DEBUG issue #83] Log per-column value counts before the invariant check.
+            const auto gotValues = mergedInMemGroup->getColumnChunk(i).getNumValues();
+            if (numResidentRows != gotValues) {
+                fprintf(stderr,
+                    "[KU83-MERGE] column drift at scanAllInsertedAndVersions: "
+                    "colIdx=%u columnID=%u expectedRows=%llu gotValues=%llu totalCols=%zu\n",
+                    i, columnIDs[i],
+                    (unsigned long long)numResidentRows, (unsigned long long)gotValues,
+                    columnIDs.size());
+                // Dump every column's actual count to see the full drift pattern.
+                for (auto j = 0u; j < columnIDs.size(); j++) {
+                    fprintf(stderr, "[KU83-MERGE]   col j=%u colID=%u numValues=%llu\n",
+                        j, columnIDs[j],
+                        (unsigned long long)mergedInMemGroup->getColumnChunk(j).getNumValues());
+                }
+            }
+            KU_ASSERT(numResidentRows == gotValues);
         }
     }
     mergedInMemGroup->setNumRows(numResidentRows);
