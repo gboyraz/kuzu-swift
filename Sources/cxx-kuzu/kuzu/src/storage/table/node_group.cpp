@@ -1,5 +1,7 @@
 #include "storage/table/node_group.h"
 
+#include <cstdlib>
+
 #include "common/assert.h"
 #include "common/types/types.h"
 #include "common/uniq_lock.h"
@@ -649,6 +651,11 @@ std::unique_ptr<ChunkedNodeGroup> NodeGroup::scanAllInsertedAndVersions(
                         j, columnIDs[j],
                         (unsigned long long)mergedInMemGroup->getColumnChunk(j).getNumValues());
                 }
+                fflush(stderr);
+                // [DEBUG issue #83] Halt immediately so the first failure produces a single
+                // clean log capture. Without this, KU_ASSERT below throws and the app catches
+                // it, then retries checkpoint → cascades into repeated drift assertions.
+                std::abort();
             }
             KU_ASSERT(numResidentRows == gotValues);
         }
