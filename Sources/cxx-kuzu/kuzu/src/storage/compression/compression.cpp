@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <string>
 
@@ -672,6 +673,11 @@ void IntegerBitpacking<T>::setValuesFromUncompressed(const uint8_t* srcBuffer, o
                 (unsigned long long)numValues, (unsigned long long)posInSrc,
                 (unsigned long long)badCount, (unsigned long long)firstBadIdx,
                 (long long)firstBadVal, (unsigned long long)posInDst);
+            fflush(stderr);
+            // [DEBUG issue #83] Halt immediately so the first failure produces a single clean
+            // log capture. Without this, KU_ASSERT below throws and the app catches it, then
+            // retries checkpoint → cascades into node_group.cpp:637 repeatedly.
+            std::abort();
         }
     }
     KU_ASSERT(numValues == static_cast<offset_t>(std::ranges::count_if(
