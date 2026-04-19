@@ -6,6 +6,7 @@
 #include <string>
 
 #include "common/assert.h"
+#include "common/debug_log.h"
 #include "common/exception/not_implemented.h"
 #include "common/exception/storage.h"
 #include "common/null_mask.h"
@@ -647,6 +648,35 @@ void IntegerBitpacking<T>::setValuesFromUncompressed(const uint8_t* srcBuffer, o
     // non-zero offset However we don't care about the value stored for null values
     // Currently they will be mangled by storage+recovery (underflow in the subtraction
     // below)
+#ifdef KUZU_DEBUG_CHECKPOINT
+    // When the invariant is about to fail, walk the batch and log the first value that
+    // doesn't fit the current compression metadata. No-op in production builds.
+    {
+        offset_t badCount = 0;
+        offset_t firstBadIdx = posInSrc + numValues;
+        int64_t firstBadVal = 0;
+        for (offset_t i = posInSrc; i < posInSrc + numValues; ++i) {
+            auto value = reinterpret_cast<const T*>(srcBuffer)[i];
+            const bool isNull = (nullMask && nullMask->isNull(i));
+            const bool fits = isNull || canUpdateInPlace(std::span(&value, 1), metadata);
+            if (!fits) {
+                ++badCount;
+                if (firstBadIdx == posInSrc + numValues) {
+                    firstBadIdx = i;
+                    firstBadVal = (int64_t)value;
+                }
+            }
+        }
+        if (badCount != 0) {
+            KUZU_CP_LOG("IntegerBitpacking::setValuesFromUncompressed in-place FAIL: "
+                        "type=%s numValues=%llu posInSrc=%llu posInDst=%llu badCount=%llu "
+                        "firstBadIdx=%llu firstBadVal=%lld\n",
+                typeid(T).name(), (unsigned long long)numValues, (unsigned long long)posInSrc,
+                (unsigned long long)posInDst, (unsigned long long)badCount,
+                (unsigned long long)firstBadIdx, (long long)firstBadVal);
+        }
+    }
+#endif
     KU_ASSERT(numValues == static_cast<offset_t>(std::ranges::count_if(
                                std::ranges::iota_view{posInSrc, posInSrc + numValues},
                                [srcBuffer, &metadata, nullMask](offset_t i) {

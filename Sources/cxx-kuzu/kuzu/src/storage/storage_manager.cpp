@@ -2,6 +2,7 @@
 
 #include "catalog/catalog_entry/node_table_catalog_entry.h"
 #include "catalog/catalog_entry/rel_group_catalog_entry.h"
+#include "common/debug_log.h"
 #include "common/file_system/virtual_file_system.h"
 #include "common/serializer/in_mem_file_writer.h"
 #include "main/client_context.h"
@@ -160,13 +161,26 @@ bool StorageManager::checkpoint(main::ClientContext* context, PageAllocator& pag
     const auto nodeTableEntries = catalog->getNodeTableEntries(&DUMMY_CHECKPOINT_TRANSACTION);
     const auto relGroupEntries = catalog->getRelGroupEntries(&DUMMY_CHECKPOINT_TRANSACTION);
 
+    KUZU_CP_LOG("StorageManager::checkpoint ENTRY nodeTables=%zu relGroups=%zu\n",
+        nodeTableEntries.size(), relGroupEntries.size());
+
     for (const auto entry : nodeTableEntries) {
         if (!tables.contains(entry->getTableID())) {
             throw RuntimeException(stringFormat(
                 "Checkpoint failed: table {} not found in storage manager.", entry->getName()));
         }
-        hasChanges =
-            tables.at(entry->getTableID())->checkpoint(context, entry, pageAllocator) || hasChanges;
+        KUZU_CP_LOG("  node table begin name=%s tableID=%llu\n", entry->getName().c_str(),
+            (unsigned long long)entry->getTableID());
+        try {
+            hasChanges = tables.at(entry->getTableID())->checkpoint(context, entry, pageAllocator) ||
+                         hasChanges;
+            KUZU_CP_LOG("  node table  done name=%s tableID=%llu OK\n", entry->getName().c_str(),
+                (unsigned long long)entry->getTableID());
+        } catch (std::exception& e) {
+            KUZU_CP_LOG("  node table FAIL name=%s tableID=%llu err=%s\n",
+                entry->getName().c_str(), (unsigned long long)entry->getTableID(), e.what());
+            throw;
+        }
     }
     for (const auto entry : relGroupEntries) {
         for (auto& info : entry->getRelEntryInfos()) {
@@ -174,12 +188,23 @@ bool StorageManager::checkpoint(main::ClientContext* context, PageAllocator& pag
                 throw RuntimeException(stringFormat(
                     "Checkpoint failed: table {} not found in storage manager.", entry->getName()));
             }
-            hasChanges =
-                tables.at(info.oid)->checkpoint(context, entry, pageAllocator) || hasChanges;
+            KUZU_CP_LOG("  rel  table begin group=%s oid=%llu\n", entry->getName().c_str(),
+                (unsigned long long)info.oid);
+            try {
+                hasChanges =
+                    tables.at(info.oid)->checkpoint(context, entry, pageAllocator) || hasChanges;
+                KUZU_CP_LOG("  rel  table  done group=%s oid=%llu OK\n", entry->getName().c_str(),
+                    (unsigned long long)info.oid);
+            } catch (std::exception& e) {
+                KUZU_CP_LOG("  rel  table FAIL group=%s oid=%llu err=%s\n",
+                    entry->getName().c_str(), (unsigned long long)info.oid, e.what());
+                throw;
+            }
         }
         entry->vacuumColumnIDs(1);
     }
     reclaimDroppedTables(*catalog);
+    KUZU_CP_LOG("StorageManager::checkpoint EXIT hasChanges=%d\n", (int)hasChanges);
     return hasChanges;
 }
 
