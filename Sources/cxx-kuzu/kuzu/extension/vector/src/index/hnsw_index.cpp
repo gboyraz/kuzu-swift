@@ -2,6 +2,7 @@
 
 #include "catalog/catalog_entry/index_catalog_entry.h"
 #include "catalog/hnsw_index_catalog_entry.h"
+#include "common/debug_log.h"
 #include "function/hnsw_index_functions.h"
 #include "index/hnsw_rel_batch_insert.h"
 #include "main/client_context.h"
@@ -739,8 +740,30 @@ void OnDiskHNSWIndex::checkpoint(main::ClientContext* context,
     storage::PageAllocator& pageAllocator) {
     auto [nodeTableEntry, upperRelTableEntry, lowerRelTableEntry] = getIndexTableCatalogEntries(
         context->getCatalog(), &DUMMY_CHECKPOINT_TRANSACTION, indexInfo);
-    upperRelTable->checkpoint(context, upperRelTableEntry, pageAllocator);
-    lowerRelTable->checkpoint(context, lowerRelTableEntry, pageAllocator);
+    KUZU_CP_LOG("  OnDiskHNSWIndex::checkpoint ENTRY indexName=%s\n", indexInfo.name.c_str());
+    try {
+        KUZU_CP_LOG("    upperRelTable checkpoint begin name=%s\n",
+            upperRelTableEntry->getName().c_str());
+        upperRelTable->checkpoint(context, upperRelTableEntry, pageAllocator);
+        KUZU_CP_LOG("    upperRelTable checkpoint  done name=%s OK\n",
+            upperRelTableEntry->getName().c_str());
+    } catch (std::exception& e) {
+        KUZU_CP_LOG("    upperRelTable checkpoint FAIL name=%s err=%s\n",
+            upperRelTableEntry->getName().c_str(), e.what());
+        throw;
+    }
+    try {
+        KUZU_CP_LOG("    lowerRelTable checkpoint begin name=%s\n",
+            lowerRelTableEntry->getName().c_str());
+        lowerRelTable->checkpoint(context, lowerRelTableEntry, pageAllocator);
+        KUZU_CP_LOG("    lowerRelTable checkpoint  done name=%s OK\n",
+            lowerRelTableEntry->getName().c_str());
+    } catch (std::exception& e) {
+        KUZU_CP_LOG("    lowerRelTable checkpoint FAIL name=%s err=%s\n",
+            lowerRelTableEntry->getName().c_str(), e.what());
+        throw;
+    }
+    KUZU_CP_LOG("  OnDiskHNSWIndex::checkpoint EXIT indexName=%s\n", indexInfo.name.c_str());
 }
 
 void OnDiskHNSWIndex::insertInternal(Transaction* transaction, common::offset_t offset,

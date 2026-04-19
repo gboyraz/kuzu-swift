@@ -1,6 +1,7 @@
 #include "storage/table/node_group.h"
 
 #include "common/assert.h"
+#include "common/debug_log.h"
 #include "common/types/types.h"
 #include "common/uniq_lock.h"
 #include "storage/buffer_manager/memory_manager.h"
@@ -634,7 +635,20 @@ std::unique_ptr<ChunkedNodeGroup> NodeGroup::scanAllInsertedAndVersions(
     }
     for (auto i = 0u; i < columnIDs.size(); i++) {
         if (columnIDs[i] != 0) {
-            KU_ASSERT(numResidentRows == mergedInMemGroup->getColumnChunk(i).getNumValues());
+            // When the invariant is about to fail, dump every column's value count so the
+            // log pinpoints which column drifted and by how much. No-op in production builds.
+            const auto gotValues = mergedInMemGroup->getColumnChunk(i).getNumValues();
+            if (numResidentRows != gotValues) {
+                KUZU_CP_LOG("scanAllInsertedAndVersions drift: colIdx=%u columnID=%u "
+                            "expectedRows=%llu gotValues=%llu totalCols=%zu\n",
+                    i, columnIDs[i], (unsigned long long)numResidentRows,
+                    (unsigned long long)gotValues, columnIDs.size());
+                for (auto j = 0u; j < columnIDs.size(); j++) {
+                    KUZU_CP_LOG("  col j=%u colID=%u numValues=%llu\n", j, columnIDs[j],
+                        (unsigned long long)mergedInMemGroup->getColumnChunk(j).getNumValues());
+                }
+            }
+            KU_ASSERT(numResidentRows == gotValues);
         }
     }
     mergedInMemGroup->setNumRows(numResidentRows);

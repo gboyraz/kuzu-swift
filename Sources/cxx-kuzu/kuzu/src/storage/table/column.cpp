@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "common/assert.h"
+#include "common/debug_log.h"
 #include "common/null_mask.h"
 #include "common/types/types.h"
 #include "common/vector/value_vector.h"
@@ -412,9 +413,13 @@ bool Column::canCheckpointInPlace(const ChunkState& state,
     const ColumnCheckpointState& checkpointState) {
     if (isEndOffsetOutOfPagesCapacity(checkpointState.persistentData.getMetadata(),
             checkpointState.endRowIdxToWrite)) {
+        KUZU_CP_LOG("    canCheckpointInPlace: NO (page capacity exceeded) compression=%d\n",
+            (int)state.metadata.compMeta.compression);
         return false;
     }
     if (checkpointState.persistentData.getMetadata().compMeta.canAlwaysUpdateInPlace()) {
+        KUZU_CP_LOG("    canCheckpointInPlace: YES (canAlwaysUpdateInPlace) compression=%d\n",
+            (int)state.metadata.compMeta.compression);
         return true;
     }
 
@@ -426,9 +431,15 @@ bool Column::canCheckpointInPlace(const ChunkState& state,
             !state.metadata.compMeta.canUpdateInPlace(chunkData->getData(), 0,
                 chunkData->getNumValues(), dataType.getPhysicalType(), localUpdateState,
                 chunkData->getNullMask())) {
+            KUZU_CP_LOG("    canCheckpointInPlace: NO (canUpdateInPlace false) compression=%d "
+                        "numValues=%llu physicalType=%d\n",
+                (int)state.metadata.compMeta.compression,
+                (unsigned long long)chunkData->getNumValues(), (int)dataType.getPhysicalType());
             return false;
         }
     }
+    KUZU_CP_LOG("    canCheckpointInPlace: YES compression=%d\n",
+        (int)state.metadata.compMeta.compression);
     return true;
 }
 
