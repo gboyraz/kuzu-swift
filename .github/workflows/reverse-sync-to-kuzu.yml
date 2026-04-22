@@ -1,0 +1,105 @@
+name: Reverse Sync to kuzu
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Sources/cxx-kuzu/kuzu/**'
+      - 'Sources/cxx-kuzu/include/**'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (show changes without applying)'
+        required: false
+        default: 'false'
+        type: boolean
+      detect_deleted:
+        description: 'Detect files deleted in kuzu-swift but still in kuzu'
+        required: false
+        default: 'true'
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  reverse-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kuzu-swift
+        uses: actions/checkout@v4
+        with:
+          path: kuzu-swift
+          fetch-depth: 2  # Need parent commit to detect changes
+
+      - name: Checkout kuzu fork
+        uses: actions/checkout@v4
+        with:
+          repository: gboyraz/kuzu
+          token: ${{ secrets.KUZU_PAT }}
+          path: kuzu
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run reverse sync
+        id: sync
+        env:
+          KUZU_REPO_PATH: ${{ github.workspace }}/kuzu
+        run: |
+          cd kuzu-swift
+          ARGS="--kuzu-path ${{ github.workspace }}/kuzu --verbose"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ "${{ inputs.detect_deleted }}" = "true" ] || [ "${{ github.event_name }}" = "push" ]; then
+            ARGS="$ARGS --detect-deleted"
+          fi
+          python3 Scripts/reverse-sync-to-kuzu.py $ARGS
+
+      - name: Check for changes
+        id: changes
+        working-directory: kuzu
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "Changes detected in kuzu repo:"
+            git diff --stat
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No changes to sync."
+          fi
+
+      - name: Create Pull Request
+        if: steps.changes.outputs.has_changes == 'true' && inputs.dry_run != 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          path: kuzu
+          token: ${{ secrets.KUZU_PAT }}
+          branch: sync/from-kuzu-swift
+          delete-branch: true
+          title: "sync: reverse sync from kuzu-swift"
+          body: |
+            ## Automated Reverse Sync
+
+            This PR was automatically created by the reverse sync workflow.
+
+            **Source:** `gboyraz/kuzu-swift` @ `${{ github.sha }}`
+            **Trigger:** ${{ github.event_name }}
+
+            ### What changed
+            Changes were detected in `Sources/cxx-kuzu/kuzu/` and synced back to the corresponding paths in this repo.
+
+            ### Review checklist
+            - [ ] Verify file changes are intentional
+            - [ ] Check if `CMakeLists.txt` needs updating (for new/deleted files)
+            - [ ] Run `make test` if applicable
+          commit-message: |
+            sync: reverse sync from kuzu-swift
+
+            Source commit: ${{ github.sha }}
+          labels: |
+            automated
+            sync
